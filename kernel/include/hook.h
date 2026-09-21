@@ -44,9 +44,30 @@ typedef int8_t chain_item_state;
 #define RELOCATE_INST_NUM (4 * 8 + 8 - 4)
 
 #define HOOK_CHAIN_NUM 0x10
-/* GCC 14 emits a ~100-instruction _transit12 (12-arg hook chain); 0x60 left it
- * overflowing the buffer and hook_chain_prepare failed with -HOOK_TRANSIT_NO_MEM. */
-#define TRANSIT_INST_NUM 0x70
+/*
+ * Words reserved for ONE transit body, plus the 6-word chain header.
+ * Both hook.c:1077 and fphook.c:197 reject with -HOOK_TRANSIT_NO_MEM when
+ *      transit_num + 6 > TRANSIT_INST_NUM
+ * and this constant is also the array dimension at hook.h:260 and :278, so it
+ * must cover the LARGEST body on every architecture.
+ *
+ * MEASURED on the linked AArch32 blob (arm-linux-gnueabi-nm on
+ * kernel/kpimg-arm-full.elf; body size = _transitN_end - _transitN):
+ *      _transit0   252 B =  63 words
+ *      _transit4   308 B =  77 words
+ *      _transit8   428 B = 107 words
+ *      _transit12  612 B = 153 words   <- largest (0x264 bytes)
+ *   _fp_transit12 = _fp_transit12_end - _fp_transit12 = 0x264 B = 153 words
+ * So the requirement is 153 + 6 = 159 = 0x9f.  The previous value 0x70 (112)
+ * made every chain that has 8 or 12 args fail with -HOOK_TRANSIT_NO_MEM: that
+ * is the `err: -4091` seen on arm32 at hook_wrap12() during patch().
+ * AArch64's `_transit12` under GCC 14 is ~100 words, which is why 0x60/0x70
+ * was enough there -- A32 simply emits a longer body.
+ * 0xC0 (192) leaves 33 words of headroom for a taller body from a different
+ * compiler; the cost is (0xC0-0x70)*4 = 320 B per hook_chain_t /
+ * fp_hook_chain_t (HOOK_CHAIN_NUM 0x10 + FP_HOOK_CHAIN_NUM 0x20 copies).
+ */
+#define TRANSIT_INST_NUM 0xC0
 
 #define FP_HOOK_CHAIN_NUM 0x20
 
@@ -56,6 +77,71 @@ typedef int8_t chain_item_state;
 #define ARM64_BTI_JC 0xd50324df
 #define ARM64_PACIASP 0xd503233f
 #define ARM64_PACIBSP 0xd503237f
+
+/*
+ * Inline-hook "chain" scratch-register convention.
+ *
+ * kp_chain_transit_header() emits the 6-word prologue of chain->transit[]: it puts
+ * the address of the hook_chain_t into a scratch register and then falls through
+ * into the _transitN body (copied to transit[6]), which reads that register back
+ * via current_inline_hook_chain().
+ *
+ *   AArch64: x16 (IP0).  LDR X16, #12 loads the 64-bit literal at transit[4..5];
+ *            B #16 skips over it into the body.
+ *   AArch32: r12 (IP).   LDR r12, [pc, #0] loads the 32-bit literal at transit[2];
+ *            B transit[6] skips over the remaining header words.
+ *
+ * An AArch32 virtual address fits in 32 bits, so the literal shrinks to one word.
+ * The header stays 6 words on every architecture so the body offset (transit[6])
+ * and the TRANSIT_INST_NUM accounting are unchanged.
+ */
+#if defined(CONFIG_ARM)
+#define KP_CHAIN_REG "r12"
+#define ARM32_NOP    0xE1A00000u /* mov r0, r0 */
+#else
+#define KP_CHAIN_REG "x16"
+#endif
+
+/*
+ * ILP32 (arm32): a uint64_t parameter occupies a *register pair* under AAPCS
+ * (arg0 = r0:r1, arg1 = r2:r3, further args on the stack, 8-byte aligned).
+ * The arm64-style uint64_t transit signatures therefore decoded a 32-bit
+ * caller's registers wrongly -- with arguments in r0-r3 (and the rest on the
+ * stack) the transit read arg1 from r2 and arg2 from the first stack slot,
+ * silently dropping r1.  Use word-sized parameters on ILP32 so a transit
+ * follows the same convention as the function it fronts, widening into the
+ * uint64_t hook_fargs*_t slots.  The transit is entered by a
+ * register-preserving jump from the trampoline (KP_CHAIN_REG carries the
+ * chain), so on arm32 this is the kernel's own convention: AAPCS for inline
+ * hooks, r0-r6 for sys_call_table entries -- args 0..3 (r0-r3) are exact;
+ * syscall args 4..6 live in r4-r6 and are not visible to an AAPCS callee.
+ */
+#if defined(CONFIG_ARM)
+typedef uint32_t kp_transit_arg_t;
+typedef uint32_t kp_transit_ret_t;
+#else
+typedef uint64_t kp_transit_arg_t;
+typedef uint64_t kp_transit_ret_t;
+#endif
+
+static inline void kp_chain_transit_header(uint32_t *transit, void *chain)
+{
+#if defined(CONFIG_ARM)
+    transit[0] = 0xE59FC000u; /* ldr r12, [pc, #0]      -> loads transit[2] */
+    transit[1] = 0xEA000003u; /* b   transit[1] + 20    -> transit[6] */
+    transit[2] = (uint32_t)(uintptr_t)chain;
+    transit[3] = ARM32_NOP;
+    transit[4] = ARM32_NOP;
+    transit[5] = ARM32_NOP;
+#else
+    transit[0] = ARM64_BTI_JC;
+    transit[1] = 0x58000070; /* LDR X16, #12 */
+    transit[2] = 0x14000004; /* B #16 */
+    transit[3] = ARM64_NOP;
+    transit[4] = ((uint64_t)(uintptr_t)chain) & 0xFFFFFFFF;
+    transit[5] = ((uint64_t)(uintptr_t)chain) >> 32u;
+#endif
+}
 
 typedef struct
 {

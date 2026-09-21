@@ -16,7 +16,56 @@
 /*
  * Generic IO read/write.  These perform native-endian accesses.
  */
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_ARM)
+
+/*
+ * AArch32 (ARMv7-A) has no MMIO access intrinsics: an access is a plain
+ * volatile pointer dereference.  Ordering is supplied by the ReadX/WriteX
+ * macro layer below -- __iormb()/__iowmb() map onto barrier.h's CONFIG_ARM
+ * rmb()/wmb(), i.e. DSB LD / DSB ST -- so the __raw_ forms stay unordered,
+ * exactly as on the other architectures.
+ */
+static inline void __raw_writeb(u8 val, volatile void __iomem *addr)
+{
+    *(volatile u8 *)addr = val;
+}
+
+static inline void __raw_writew(u16 val, volatile void __iomem *addr)
+{
+    *(volatile u16 *)addr = val;
+}
+
+static inline void __raw_writel(u32 val, volatile void __iomem *addr)
+{
+    *(volatile u32 *)addr = val;
+}
+
+static inline void __raw_writeq(u64 val, volatile void __iomem *addr)
+{
+    *(volatile u64 *)addr = val;
+}
+
+static inline u8 __raw_readb(const volatile void __iomem *addr)
+{
+    return *(volatile u8 *)addr;
+}
+
+static inline u16 __raw_readw(const volatile void __iomem *addr)
+{
+    return *(volatile u16 *)addr;
+}
+
+static inline u32 __raw_readl(const volatile void __iomem *addr)
+{
+    return *(volatile u32 *)addr;
+}
+
+static inline u64 __raw_readq(const volatile void __iomem *addr)
+{
+    return *(volatile u64 *)addr;
+}
+
+#elif defined(CONFIG_X86_64)
 
 static inline void __raw_writeb(u8 val, volatile void __iomem *addr)
 {
@@ -124,7 +173,7 @@ static inline u64 __raw_readq(const volatile void __iomem *addr)
     return val;
 }
 
-#endif /* CONFIG_X86_64 */
+#endif /* CONFIG_ARM / CONFIG_X86_64 */
 
 /* IO barriers */
 #define __iormb() rmb()

@@ -47,6 +47,21 @@ typedef struct
     int64_t page_shift;
     uint64_t kimage_voffset;
     uint64_t linear_voffset;
+#ifdef MAP_DEBUG
+    // ---- M4b: appended last, so no earlier offset moves. ----
+    // Hand-assembled A32 code kept as *data* and read back through the
+    // relocated map_data pointer, so it needs no relocation at all:
+    //   e92d4010 push {r4, lr}   e1a04000 mov r4, r0
+    //   e1a00001 mov  r0, r1     e12fff34 blx r4
+    //   e8bd8010 pop  {r4, pc}
+    char test_code[20];
+    char str_fmt_alloc[40]; // "KP-ARM m: %x %x %x %x\n"
+    char str_fmt_call[24];  // "KP-ARM call ok\n"
+    char str_fmt_pre[24];   // "KP-ARM pre: %x %x\n"
+    char str_fmt_desc[64];  // "KP-ARM r: %x %x %x %x %x %x\n"
+    char str_fmt_xn[40];    // "KP-ARM xn: %x %x %x %x\n"
+    char _reserved[12];     // keep sizeof(map_data_t) % MAP_ALIGN == 0
+#endif
 } map_data_t;
 #else
 #define map_paging_init_backup_offset 0

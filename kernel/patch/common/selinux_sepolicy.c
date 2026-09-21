@@ -492,7 +492,7 @@ static void kp_capture_committed_policy(void *load_state)
         for (int i = 0; i < KP_FAKE_STATE_SIZE; i += sizeof(void *)) {
             if (*(void **)((char *)kvar(selinux_state) + i) == policy) {
                 g_state_policy_offset = i;
-                log_boot("selinux_sepolicy: state->policy offset = %d (%llx)\n", i, (unsigned long)policy);
+                log_boot("selinux_sepolicy: state->policy offset = %d (%llx)\n", i, (unsigned long long)(unsigned long)policy);
                 break;
             }
         }
@@ -716,7 +716,7 @@ static int kp_snapshot_with_policy(void)
     g_backup_policy = g_backup_policy_buf;
     g_backup_ready = true;
     log_boot("selinux_sepolicy: backup ready via policydb_read (%llx, pdb off %d)\n",
-             (unsigned long)g_backup_policy, g_policydb_offset);
+             (unsigned long long)g_backup_policy, g_policydb_offset);
     return 0;
 }
 
@@ -916,25 +916,29 @@ int selinux_sepolicy_init(void)
     addr = lookup_name_with_suffix("selinux_policy_commit");
     if (addr && !selinux_sepolicy_use_fake_state()) {
         hook_wrap1((void *)addr, after_selinux_policy_commit_1arg, NULL, NULL);
-        log_boot("selinux_sepolicy: hooked selinux_policy_commit @ %llx\n", addr);
+        log_boot("selinux_sepolicy: hooked selinux_policy_commit @ %llx\n", (unsigned long long)addr);
     }
     addr = lookup_name_with_suffix("context_struct_compute_av");
     if (addr) {
         hook_wrap6((void *)addr, before_context_struct_compute_av, NULL, NULL);
-        log_boot("selinux_sepolicy: hooked context_struct_compute_av @ %llx\n", addr);
+        log_boot("selinux_sepolicy: hooked context_struct_compute_av @ %llx\n", (unsigned long long)addr);
     }
     addr = lookup_name_with_suffix("string_to_context_struct");
     if (addr) {
         hook_wrap5((void *)addr, before_string_to_context_struct, NULL, NULL);
-        log_boot("selinux_sepolicy: hooked string_to_context_struct @ %llx\n", addr);
+        log_boot("selinux_sepolicy: hooked string_to_context_struct @ %llx\n", (unsigned long long)addr);
     }
 
 
     log_boot("selinux_sepolicy: read=%llx str2ctx=%llx sidtab2sid=%llx search=%llx\n",
-             (unsigned long)kfunc(security_read_policy), (unsigned long)kp_string_to_context_struct,
-             (unsigned long)kp_sidtab_context_to_sid, (unsigned long)kp_sidtab_search_entry);
+             (unsigned long long)(unsigned long)kfunc(security_read_policy),
+             (unsigned long long)(unsigned long)kp_string_to_context_struct,
+             (unsigned long long)(unsigned long)kp_sidtab_context_to_sid,
+             (unsigned long long)(unsigned long)kp_sidtab_search_entry);
     log_boot("selinux_sepolicy: sid2str=%llx ctx2str=%llx search_core=%llx compute_av=%llx\n",
-             (unsigned long)kp_sidtab_sid2str_get, (unsigned long)kp_context_struct_to_string,
-             (unsigned long)kp_sidtab_search_core, (unsigned long)kp_context_struct_compute_av);
+             (unsigned long long)(unsigned long)kp_sidtab_sid2str_get,
+             (unsigned long long)(unsigned long)kp_context_struct_to_string,
+             (unsigned long long)(unsigned long)kp_sidtab_search_core,
+             (unsigned long long)(unsigned long)kp_context_struct_compute_av);
     return 0;
 }

@@ -60,13 +60,13 @@ int bypass_kcfi()
     if (!report_cfi_failure_addr && kallsyms_lookup_name) {
         report_cfi_failure_addr = kallsyms_lookup_name("report_cfi_failure");
         if (report_cfi_failure_addr)
-            log_boot("report_cfi_failure resolved at runtime: %llx\n", report_cfi_failure_addr);
+            log_boot("report_cfi_failure resolved at runtime: %llx\n", (unsigned long long)report_cfi_failure_addr);
     }
     if (report_cfi_failure_addr) {
         hook_err_t err = hook((void *)report_cfi_failure_addr, (void *)replace_report_cfi_failure,
                               (void **)&backup_report_cfi_failure);
         if (err) {
-            log_boot("hook report_cfi_failure: %llx, error: %d\n", report_cfi_failure_addr, err);
+            log_boot("hook report_cfi_failure: %llx, error: %d\n", (unsigned long long)report_cfi_failure_addr, err);
             rc = err;
             goto out;
         }
@@ -81,13 +81,13 @@ int bypass_kcfi()
         __cfi_slowpath_addr = kallsyms_lookup_name("__cfi_slowpath_diag");
         if (!__cfi_slowpath_addr) __cfi_slowpath_addr = kallsyms_lookup_name("__cfi_slowpath");
         if (__cfi_slowpath_addr)
-            log_boot("__cfi_slowpath_diag resolved at runtime: %llx\n", __cfi_slowpath_addr);
+            log_boot("__cfi_slowpath_diag resolved at runtime: %llx\n", (unsigned long long)__cfi_slowpath_addr);
     }
     if (__cfi_slowpath_addr) {
         hook_err_t err =
             hook((void *)__cfi_slowpath_addr, (void *)replace__cfi_slowpath, (void **)&backup__cfi_slowpath);
         if (err) {
-            log_boot("hook __cfi_slowpath_diag: %llx, error: %d\n", __cfi_slowpath_addr, err);
+            log_boot("hook __cfi_slowpath_diag: %llx, error: %d\n", (unsigned long long)__cfi_slowpath_addr, err);
             rc = err;
             goto out;
         }

@@ -24,6 +24,18 @@ int b(uint32_t *buf, uint64_t from, uint64_t to)
     return 0;
 }
 
+// aarch32 port: encode an ARM (A32) unconditional B at `from` targeting `to`.
+// ARM branch target = (PC_of_B + 8) + (SignExtend(imm24) << 2), so the encoded
+// displacement subtracts the 8-byte pipeline offset. Range is +-32MB.
+int b_arm(uint32_t *buf, uint64_t from, uint64_t to)
+{
+    int64_t off = (int64_t)to - (int64_t)from - 8;
+    if (off < -0x2000000 || off > 0x1fffffc) return 0; // out of B range
+    uint32_t imm24 = ((uint32_t)((uint64_t)off >> 2)) & 0x00ffffffu;
+    buf[0] = 0xea000000u | imm24; // B <label> (cond = AL)
+    return 4;
+}
+
 int32_t relo_branch_func(const char *img, int32_t func_offset)
 {
     uint32_t inst = *(uint32_t *)(img + func_offset);

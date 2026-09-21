@@ -160,7 +160,12 @@ int patch()
     hook_err_t rc = 0;
 
     unsigned long panic_addr = patch_config->panic;
-    logkd("panic addr: %llx\n", panic_addr);
+    /* Cast to the type %llx actually reads.  `unsigned long` is 32-bit on
+     * AArch32 (ILP32), so passing it straight to a 64-bit conversion made
+     * vsnprintf consume the register PAIR and print (next_reg << 32) | value
+     * -- the `c10b2964cb821100` garbage in the arm32 boot log.  An explicit
+     * unsigned long long is correct on both ILP32 and LP64. */
+    logkd("panic addr: %llx\n", (unsigned long long)panic_addr);
     if (panic_addr) {
         rc = hook_wrap12((void *)panic_addr, before_panic, 0, 0);
         log_boot("hook panic rc: %d\n", rc);

@@ -246,8 +246,17 @@ uint64_t _kp_rw_end = 0;
 uint64_t _kp_region_start = 0;
 uint64_t _kp_region_end = 0;
 
+#if defined(CONFIG_ARM)
+/* include/symbol.h declares both of these as `unsigned long`.  On ILP32 that is
+ * 32-bit and a *different type* from uint64_t (`unsigned long long`), so the
+ * definitions must match the declaration exactly.  On LP64 `unsigned long` is
+ * 64-bit, so the arm64/x86_64 definitions below are unchanged. */
+unsigned long link_base_addr = (unsigned long)_link_base;
+unsigned long runtime_base_addr = 0;
+#else
 uint64_t link_base_addr = (uint64_t)_link_base;
 uint64_t runtime_base_addr = 0;
+#endif
 
 uint64_t kimage_voffset = 0;
 uint64_t linear_voffset = 0;
@@ -274,9 +283,15 @@ static bool boot_log_full = false;
 
 static inline bool hw_dirty()
 {
+#if defined(CONFIG_ARM)
+    /* ARMv7 short descriptors have no hardware dirty-bit management (that is an
+     * AArch64 TCR_EL1.HD feature), so it can never be active here. */
+    return false;
+#else
     uint64_t tcr_el1;
     asm volatile("mrs %0, tcr_el1" : "=r"(tcr_el1));
     return tcr_el1 & 0x10000000000;
+#endif
 }
 
 const char *get_boot_log()
@@ -312,6 +327,32 @@ void log_boot(const char *fmt, ...)
     printk("KP %s", line);
 }
 
+/*
+ * Page-table entry width differs per architecture: AArch32 short descriptors
+ * are one 32-bit word (uintptr_t, see include/pgtable.h), while arm64/x86_64
+ * entries are 64-bit.  prot_myself()/restore_map() dereference and write these
+ * entries back, so the pointee must be the real entry width, not a fixed 64.
+ */
+#if defined(CONFIG_ARM)
+typedef uintptr_t kp_pte_t;
+#else
+typedef uint64_t kp_pte_t;
+#endif
+
+#if defined(CONFIG_ARM)
+/*
+ * AArch32, non-LPAE: a single 32-bit translation regime and TTBCR.N == 0, i.e.
+ * one 4096-entry L1 table of 1 MB/coarse descriptors covering the whole 4 GB,
+ * so the entire walk for a VA is its L1 slot (include/pgtable.h: kp_l1_slot()).
+ * `pgd` is the L1 base VA; pgd == 0 means "use the live TTBR0 table", which is
+ * also what pgtable_entry_kernel() returns.
+ */
+uintptr_t *pgtable_entry(uint64_t pgd, uint64_t va)
+{
+    if (!pgd) return kp_l1_slot(va);
+    return &((uintptr_t *)(uintptr_t)pgd)[kp_l1_index(va)];
+}
+#else
 uint64_t *pgtable_entry(uint64_t pgd, uint64_t va)
 {
     uint64_t pxd_bits = page_shift - 3;
@@ -359,8 +400,30 @@ uint64_t *pgtable_entry(uint64_t pgd, uint64_t va)
 #endif
     return (uint64_t *)pxd_entry_va;
 }
+#endif /* CONFIG_ARM */
 KP_EXPORT_SYMBOL(pgtable_entry);
 
+#if defined(CONFIG_ARM)
+/*
+ * PA behind a kernel VA, using the same single-table short-descriptor model as
+ * include/pgtable.h:kp_va_to_phys(), but starting from the caller's L1 base.
+ * L1 types: 0b10 = 1 MB section (leaf), 0b01 = coarse page table whose 256
+ * entries are 4 KB small pages; anything else is a fault.
+ */
+uint64_t pgtable_phys(uint64_t pgd, uint64_t va)
+{
+    uintptr_t l1 = *pgtable_entry(pgd, va);
+    if ((l1 & PTE_TYPE_MASK) == PTE_TYPE_SECT)
+        return (uint64_t)(l1 & PTE_SECT_BASE_MASK) | (va & 0xfffffu);
+    if ((l1 & PTE_TYPE_MASK) == PTE_TYPE_TABLE) {
+        uintptr_t *l2 = (uintptr_t *)(uintptr_t)phys_to_virt(l1 & 0xfffffc00u);
+        uintptr_t pte = l2[(va >> 12) & 0xffu];
+        if ((pte & PTE_TYPE_MASK) != PTE_TYPE_PAGE) return 0;
+        return (uint64_t)(pte & 0xfffff000u) | (va & 0xfffu);
+    }
+    return 0;
+}
+#else
 uint64_t pgtable_phys(uint64_t pgd, uint64_t va)
 {
     uint64_t pxd_bits = page_shift - 3;
@@ -388,20 +451,21 @@ uint64_t pgtable_phys(uint64_t pgd, uint64_t va)
     }
     return pxd_pa ? pxd_pa + (va & (page_size - 1)) : 0;
 }
+#endif /* CONFIG_ARM */
 KP_EXPORT_SYMBOL(pgtable_phys);
 
 static void prot_myself()
 {
-    uint64_t *kpte = pgtable_entry_kernel(kernel_stext_va);
-    log_boot("Kernel stext prot: %llx\n", *kpte);
+    kp_pte_t *kpte = pgtable_entry_kernel(kernel_stext_va);
+    log_boot("Kernel stext prot: %llx\n", (uint64_t)*kpte);
 
     _kp_region_start = (uint64_t)_kp_text_start;
     _kp_region_end = (uint64_t)_kp_end + align_ceil(start_preset.extra_size, page_size) + HOOK_ALLOC_SIZE +
                      MEMORY_ROX_SIZE + MEMORY_RW_SIZE;
     log_boot("Region: %llx, %llx\n", _kp_region_start, _kp_region_end);
 
-    uint64_t *kppte = pgtable_entry_kernel(_kp_region_start);
-    log_boot("KernelPatch start prot: %llx\n", *kppte);
+    kp_pte_t *kppte = pgtable_entry_kernel(_kp_region_start);
+    log_boot("KernelPatch start prot: %llx\n", (uint64_t)*kppte);
 
     // text, rodata
     uint64_t text_start = (uint64_t)_kp_text_start;
@@ -410,7 +474,7 @@ static void prot_myself()
     log_boot("Text: %llx, %llx\n", text_start, text_end);
 
     for (uint64_t i = text_start; i < align_text_end; i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         *pte = (*pte | PTE_SHARED) & ~PTE_PXN & ~PTE_GP;
         if (has_vmalloc_area()) {
             *pte = (*pte | PTE_RDONLY) & ~PTE_DBM;
@@ -425,7 +489,7 @@ static void prot_myself()
     log_boot("Data: %llx, %llx\n", data_start, data_end);
 
     for (uint64_t i = data_start; i < align_data_end; i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         *pte = (*pte | PTE_DBM | PTE_SHARED) & ~PTE_RDONLY;
         if (has_vmalloc_area()) {
             *pte |= PTE_PXN;
@@ -440,7 +504,7 @@ static void prot_myself()
     log_boot("Extra: %llx, %llx\n", _kp_extra_start, _kp_extra_end);
 
     for (uint64_t i = _kp_extra_start; i < align_extra_end; i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         *pte = (*pte | PTE_DBM | PTE_SHARED) & ~PTE_RDONLY;
         if (has_vmalloc_area()) {
             *pte |= PTE_PXN;
@@ -454,7 +518,7 @@ static void prot_myself()
     log_boot("Hook: %llx, %llx\n", _kp_hook_start, _kp_hook_end);
 
     for (uint64_t i = _kp_hook_start; i < _kp_hook_end; i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         *pte = (*pte | PTE_DBM | PTE_SHARED) & ~PTE_PXN & ~PTE_RDONLY & ~PTE_GP;
     }
     flush_tlb_kernel_range(_kp_hook_start, _kp_hook_end);
@@ -466,7 +530,7 @@ static void prot_myself()
     log_boot("RW: %llx, %llx\n", _kp_rw_start, _kp_rw_end);
 
     for (uint64_t i = _kp_rw_start; i < _kp_rw_end; i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         *pte = (*pte | PTE_DBM | PTE_SHARED) & ~PTE_RDONLY;
         if (has_vmalloc_area()) {
             *pte |= PTE_PXN;
@@ -486,7 +550,7 @@ static void prot_myself()
     tlsf_add_pool(kp_rox_mem, (void *)_kp_rox_start, MEMORY_ROX_SIZE);
 
     for (uint64_t i = _kp_rox_start; i < _kp_rox_end; i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         *pte = (*pte | PTE_SHARED) & ~PTE_PXN & ~PTE_GP;
         // todo: tlsf malloc block_split will write to alloced memory
         // if (has_vmalloc_area()) {
@@ -507,7 +571,7 @@ static void prot_myself()
         kp_vm.flags = 0x00000044;
         kp_vm.caller = (void *)_kp_region_start;
         vm_area_add_early(&kp_vm);
-        log_boot("add vmalloc area: %llx, %llx\n", kp_vm.addr, kp_vm.size);
+        log_boot("add vmalloc area: %llx, %llx\n", (unsigned long long)kp_vm.addr, (unsigned long long)kp_vm.size);
     }
 }
 
@@ -516,18 +580,36 @@ static void prot_myself()
 // sched_init: the anchor functions (tcp_init_sock & friends) must be
 // restored before any of them can be called again, and the tail return
 // below in start() never executes the anchor bytes after this.
+//
+// AArch32 does not use a sacrificed kernel function at all: the map region
+// lives in the kernel image's own section-alignment padding, which contains no
+// live kernel content, so there is nothing to restore.  Worse, restoring it
+// would be actively fatal -- on AArch32 the tail call `((start_f)start_va)(...)`
+// at the end of _paging_init re-enters the *map region itself*, which is
+// therefore still executing when start() runs.  The backup saved before the
+// copy is all zeros, so restoring it would overwrite the running code and
+// prefetch-abort.  Observed on the 5.15.167 oracle: the byte-identical image
+// instruction at 0xc0f94924 was zeroed by the restore and the CPU took a
+// prefetch abort there (log: `Restore: ffffffffc0f940e0, ffffffffc0f950e0`
+// followed by a fault at 0xc0f94924).
 static int map_restored = 0;
 void restore_map()
 {
     if (map_restored) return;
     map_restored = 1;
 
+#if defined(CONFIG_ARM)
+    // Nothing to restore: the map region was never borrowed from live kernel
+    // text.  Logged so the skip is visible rather than silent.
+    log_boot("Restore: skipped (arm32 keeps .setup.map in linker padding)\n");
+    return;
+#else
     uint64_t start = kernel_va + start_preset.map_offset;
     uint64_t end = start + start_preset.map_backup_len;
     log_boot("Restore: %llx, %llx\n", start, end);
 
     for (uint64_t i = start; i < align_ceil(end, page_size); i += page_size) {
-        uint64_t *pte = pgtable_entry_kernel(i);
+        kp_pte_t *pte = pgtable_entry_kernel(i);
         uint64_t orig = *pte;
         *pte = (orig | PTE_DBM) & ~PTE_RDONLY;
         flush_tlb_kernel_page(i);
@@ -538,8 +620,38 @@ void restore_map()
         flush_tlb_kernel_page(i);
     }
     flush_icache_all();
+#endif
 }
 
+#if defined(CONFIG_ARM)
+/*
+ * AArch32 counterpart of the arm64 system-register dump below.  AArch32 has no
+ * exception levels and no AArch64 ID_*_EL1 registers, so the equivalent
+ * information comes from CP15.  CRn/CRm/op2 are spelled literally (opcode1 is 0
+ * for every one of these) so each read is self-documenting.
+ */
+#define log_cp15(name, crn, crm, op2)                                               \
+    do {                                                                            \
+        uint32_t name##_val = 0;                                                    \
+        asm volatile("mrc p15, 0, %0, " #crn ", " #crm ", " #op2 : "=r"(name##_val)); \
+        log_boot("" #name ": %x\n", name##_val);                                    \
+    } while (0)
+
+static void log_regs()
+{
+    log_cp15(MIDR, c0, c0, 0);     /* Main ID Register */
+    log_cp15(CTR, c0, c0, 1);      /* Cache Type Register */
+    log_cp15(TLBTR, c0, c0, 3);    /* TLB Type Register */
+    log_cp15(MPIDR, c0, c0, 5);    /* Multiprocessor Affinity Register */
+    log_cp15(REVIDR, c0, c0, 6);   /* Revision ID Register */
+    log_cp15(ID_PFR0, c0, c1, 0);  /* Processor Feature Register 0 */
+    log_cp15(ID_MMFR3, c0, c1, 7); /* Memory Model Feature Register 3 */
+    log_cp15(ID_ISAR4, c0, c2, 4); /* Instruction Set Attribute Register 4 */
+    log_cp15(SCTLR, c1, c0, 0);    /* System Control Register */
+    log_cp15(TTBR0, c2, c0, 0);    /* Translation Table Base Register 0 */
+    log_cp15(TTBCR, c2, c0, 2);    /* Translation Table Base Control Register */
+}
+#else /* AArch64 */
 #define log_reg(regname)                                                   \
     do {                                                                   \
         uint64_t regname##_val = 0;                                        \
@@ -598,6 +710,7 @@ static void log_regs()
     // log_reg(PMMIR_EL1); //        | R       | Performance Monitors Machine Identification Register
     // log_reg(PMSIDR_EL1); //       | R   [4] | Sampling Profiling ID Register
 }
+#endif /* CONFIG_ARM */
 
 static int start_init(uint64_t kimage_voff, uint64_t linear_voff)
 {
@@ -610,7 +723,7 @@ static int start_init(uint64_t kimage_voff, uint64_t linear_voff)
     kernel_pa = start_preset.kernel_pa;
     kernel_va = kimage_voff + kernel_pa;
     kernel_size = start_preset.kernel_size;
-    runtime_base_addr = (uint64_t)_link_base;
+    runtime_base_addr = (unsigned long)_link_base;
 
     if (start_preset.patch_config.printk) {
         printk = (typeof(printk))(kernel_va + start_preset.patch_config.printk);
@@ -673,12 +786,27 @@ static int start_init(uint64_t kimage_voff, uint64_t linear_voff)
     log_boot("kallsyms_lookup_name offset: %llx (%s)\n", (uint64_t)start_preset.kallsyms_lookup_name_offset,
              kallsyms_resolver);
 
-    log_boot("KernelPatch link base: %llx, runtime base: %llx\n", link_base_addr, runtime_base_addr);
+    log_boot("KernelPatch link base: %llx, runtime base: %llx\n", (uint64_t)link_base_addr,
+             (uint64_t)runtime_base_addr);
 
     kallsyms_on_each_symbol = (typeof(kallsyms_on_each_symbol))kallsyms_lookup_name("kallsyms_on_each_symbol");
     kernel_kallsyms_on_each_match_symbol =
         (typeof(kernel_kallsyms_on_each_match_symbol))kallsyms_lookup_name("kallsyms_on_each_match_symbol");
 
+#if defined(CONFIG_ARM)
+    /* AArch32, non-LPAE: no TCR_EL1/TTBR1_EL1 and no exception levels.  There is
+     * one 32-bit translation regime with 4 KB pages (L1 + L2) and, because the
+     * target's TTBCR.N == 0, TTBR0's single 4096-entry table covers the whole
+     * 4 GB -- see include/pgtable.h.  pgd_va is that L1 table's VA. */
+    va_bits = 32;
+    page_shift = 12;
+    page_size = 1 << page_shift;
+    page_level = 2;
+    pgd_pa = kp_read_ttbr0() & 0xffffc000u;
+    pgd_va = phys_to_virt(pgd_pa);
+    log_boot("TTBR0: %llx, TTBCR: %llx\n", (uint64_t)kp_read_ttbr0(), (uint64_t)kp_read_ttbcr());
+    return 0;
+#else
     uint64_t tcr_el1;
     asm volatile("mrs %0, tcr_el1" : "=r"(tcr_el1));
     uint64_t t1sz = bits(tcr_el1, 21, 16);
@@ -702,6 +830,7 @@ static int start_init(uint64_t kimage_voff, uint64_t linear_voff)
     pgd_pa = baddr & page_size_mask;
     pgd_va = phys_to_virt(pgd_pa);
     return 0;
+#endif
 }
 
 void symbol_init();
@@ -717,14 +846,41 @@ int __attribute__((section(".start.text"))) __noinline start(uint64_t kimage_vof
     rc = start_init(kimage_voff, linear_voff);
     if (rc) return rc;
     prot_myself();
-    // restore the map anchor (the sacrificed tcp_init_sock & friends) as
-    // soon as KP's regions are up; the tail return below never executes
-    // the anchor bytes again, so this is safe for every kernel
+    // Restore the map anchor.
+    //
+    // ARM64: select_map_area() NOPs a code hole in live kernel text and the
+    // bytes there ARE relocated into, so they must be restored -- and the tail
+    // return below is what makes that safe (`return ...` never re-executes the
+    // hooked bytes).
+    //
+    // AArch32 (Design B): kptools places .setup.map in the linker padding page
+    // immediately below __init_begin (no kallsyms symbol there, bytes verified
+    // all-zero in the input image, page necessarily in the MT_MEMORY_RWX half).
+    // kptools NOPs nothing on arm32, so nothing was borrowed from live code and
+    // there is nothing to restore.  restore_map() still runs for the arm64
+    // path's sake but early-returns on CONFIG_ARM, which is why ARM32 needs no
+    // stack-frame handoff and no "tail never executes it" argument at all --
+    // the reason root cause 7 cannot recur here.
     restore_map();
     log_regs();
     predata_init();
     symbol_init();
     rc = patch();
+#if defined(CONFIG_ARM)
+    // AArch32: return normally.
+    //
+    // The LINKED _paging_init is base/map.c:650 (kernel/arm/map.c's `bx r12`
+    // stub is the superseded M4a scaffold and is NOT linked).  base/map.c
+    // restores paging_init's original first instruction, calls the real
+    // paging_init itself, builds and copies the map region, and finally calls
+    // start() with a plain `bl` (base/map.c:906).  So start() is an ordinary
+    // callee: returning here lands back in _paging_init's tail, whose own
+    // epilogue returns straight to paging_init's original caller.  No frame
+    // rebuild is needed or safe to guess -- the A32 paging_init prologue
+    // layout has not been measured -- and no bytes need restoring because the
+    // map region was never borrowed from live text (see restore_map above).
+    return rc;
+#else
     // Return to the kernel's paging_init caller directly, restoring
     // _paging_init's callee-saved registers from its frame: [our x29] = its
     // x29 (P); its saved x19-x28 at P+16..P+88; the caller's frame pointer
@@ -756,4 +912,5 @@ int __attribute__((section(".start.text"))) __noinline start(uint64_t kimage_vof
         : : : "x10", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
               "x27", "x28", "x29", "x30", "memory");
     __builtin_unreachable();
+#endif
 }

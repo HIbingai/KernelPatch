@@ -123,7 +123,24 @@ KP_EXPORT_SYMBOL(thread_size);
 int thread_info_in_task = 0;
 KP_EXPORT_SYMBOL(thread_info_in_task);
 
+#if defined(CONFIG_ARM)
+/*
+ * AArch32 has no SP_EL0.  The register that plays its role is TPIDRPRW
+ * (CP15 c13,c0,3): the kernel loads it with the task pointer on context switch
+ * when CONFIG_THREAD_INFO_IN_TASK=y, and linux/arch/arm/include/asm/current.h
+ * calls the resulting flag `tpidrprw_is_current`.  Keep ONE storage with both
+ * names rather than two variables that could silently drift apart; the
+ * assignment sites in resolve_current() below use the arm64-era spelling, so
+ * the alias points that way.  KP_EXPORT_SYMBOL() expands its argument before
+ * stringifying, so both the defined symbol and the exported name become
+ * tpidrprw_is_current -- which is the name the AArch32 asm/current.h links
+ * against.
+ */
+int tpidrprw_is_current = 0;
+#define sp_el0_is_current tpidrprw_is_current
+#else
 int sp_el0_is_current = 0;
+#endif
 KP_EXPORT_SYMBOL(sp_el0_is_current);
 
 int sp_el0_is_thread_info = 0;
@@ -198,7 +215,7 @@ int resolve_cred_offset()
     kernel_cap_t effective, inheritable, permitted;
     cap_capget(task, &effective, &inheritable, &permitted);
     full_cap.val = effective.val;
-    log_boot("    full_cap capability: %x\n", full_cap.val);
+    log_boot("    full_cap capability: %x\n", (unsigned int)full_cap.val);
 
     kernel_cap_t new_cap_e = { 0xff }, new_cap_i = { 0xf }, new_cap_p = { 0xfff };
     cap_capset(cred1, cred, &new_cap_e, &new_cap_i, &new_cap_p);
@@ -262,13 +279,37 @@ int resolve_cred_offset()
         uid_t *uidp = (uid_t *)((uintptr_t)cred + i);
         if (*uidp) continue;
         *uidp = 1158;
-        if (raw_syscall0(__NR_geteuid) == 1158) {
+#if defined(CONFIG_ARM)
+        /* AArch32 EABI call numbers:  getuid32=199, getgid32=200,
+         * geteuid32=201, getegid32=202.  The asm-generic numbers (174-177)
+         * that the arm64 build resolves __NR_geteuid/etc. to are WRONG here: raw_syscall0
+         * looks the number up in the *native* sys_call_table, so 175 there is
+         * some unrelated syscall (munlock family) and the probe crashes. */
+#define KP_NR_GETUID  199
+#define KP_NR_GETGID  200
+#define KP_NR_GETEUID 201
+#define KP_NR_GETEGID 202
+#define KP_NR_SETFSUID  138
+#define KP_NR_SETFSGID  139
+#define KP_NR_SETRESUID 164
+#define KP_NR_SETRESGID 170
+#else
+#define KP_NR_GETUID  __NR_getuid
+#define KP_NR_GETGID  __NR_getgid
+#define KP_NR_GETEUID __NR_geteuid
+#define KP_NR_GETEGID __NR_getegid
+#define KP_NR_SETFSUID  __NR_setfsuid
+#define KP_NR_SETFSGID  __NR_setfsgid
+#define KP_NR_SETRESUID __NR_setresuid
+#define KP_NR_SETRESGID __NR_setresgid
+#endif
+        if (raw_syscall0(KP_NR_GETEUID) == 1158) {
             cred_offset.euid_offset = i;
-        } else if (raw_syscall0(__NR_getuid) == 1158) {
+        } else if (raw_syscall0(KP_NR_GETUID) == 1158) {
             cred_offset.uid_offset = i;
-        } else if (raw_syscall0(__NR_getegid) == 1158) {
+        } else if (raw_syscall0(KP_NR_GETEGID) == 1158) {
             cred_offset.egid_offset = i;
-        } else if (raw_syscall0(__NR_getgid) == 1158) {
+        } else if (raw_syscall0(KP_NR_GETGID) == 1158) {
             cred_offset.gid_offset = i;
         } else {
             *uidp = 0;
@@ -288,7 +329,7 @@ int resolve_cred_offset()
         uid_t *uidp = (uid_t *)((uintptr_t)cred + i);
         uid_t backup = *uidp;
         *uidp = 1158;
-        uid_t old_uid = raw_syscall1(__NR_setfsuid, -1);
+        uid_t old_uid = raw_syscall1(KP_NR_SETFSUID, -1);
         *uidp = backup;
         if (old_uid == 1158) {
             cred_offset.fsuid_offset = i;
@@ -305,7 +346,7 @@ int resolve_cred_offset()
         gid_t *gidp = (gid_t *)((uintptr_t)new_cred + i);
         gid_t backup = *gidp;
         *gidp = 1158;
-        gid_t old_gid = raw_syscall1(__NR_setfsgid, -1);
+        gid_t old_gid = raw_syscall1(KP_NR_SETFSGID, -1);
         *gidp = backup;
         if (old_gid == 1158) {
             cred_offset.fsgid_offset = i;
@@ -316,7 +357,7 @@ int resolve_cred_offset()
     log_boot("    fsgid offset: %x\n", cred_offset.fsgid_offset);
 
     // suid
-    raw_syscall3(__NR_setresuid, 0, 0, 1158);
+    raw_syscall3(KP_NR_SETRESUID, 0, 0, 1158);
     new_cred = *(struct cred **)((uintptr_t)task + task_struct_offset.cred_offset);
     for (int i = 0; i < CRED_MAX_SIZE; i += sizeof(uint32_t)) {
         if (is_bl(i)) continue;
@@ -331,7 +372,7 @@ int resolve_cred_offset()
     log_boot("    suid offset: %x\n", cred_offset.suid_offset);
 
     // sgid
-    raw_syscall3(__NR_setresgid, 0, 0, 1158);
+    raw_syscall3(KP_NR_SETRESGID, 0, 0, 1158);
     new_cred = *(struct cred **)((uintptr_t)task + task_struct_offset.cred_offset);
     for (int i = 0; i < CRED_MAX_SIZE; i += sizeof(uint32_t)) {
         if (is_bl(i)) continue;
@@ -376,12 +417,27 @@ int resolve_cred_offset()
 
 static int find_swapper_comm_offset(uint64_t start, int size)
 {
+#if defined(CONFIG_ARM)
+    /* AArch32: init_task etc. live in the kernel *linear* map (c0000000+ page
+     * tables), which is NOT a KP-vmalloc range, so is_kimg_range() would make
+     * every probe return -1 and all offsets stay 0xffffffff.  The linear map
+     * is live here (MMU on) and task_struct is fully mapped, so a bounded
+     * read is safe.  Keep the range gate for arm64/x86, where the caller
+     * hands over KP-mapped addresses. */
+#else
     if (!is_kimg_range(start) || !is_kimg_range(start + size)) return -1;
+#endif
     char swapper_comm[TASK_COMM_LEN] = "swapper";
     char swapper_comm_1[TASK_COMM_LEN] = "swapper/0";
-    for (uint64_t i = start; i < start + size; i += sizeof(uint32_t)) {
+    /*
+     * Iterate with a pointer-sized index: `i` is dereferenced as a (char *),
+     * and on ILP32 a uint64_t index would need an int-to-pointer cast that is
+     * both a warning and a width lie.  (uintptr_t is uint64_t on LP64, so this
+     * is a no-op for the AArch64 build.)
+     */
+    for (uintptr_t i = (uintptr_t)start; i < (uintptr_t)(start + size); i += sizeof(uint32_t)) {
         if (!lib_strcmp(swapper_comm, (char *)i) || !lib_strcmp(swapper_comm_1, (char *)i)) {
-            return i - start;
+            return (int)(i - (uintptr_t)start);
         }
     }
     return -1;
@@ -400,7 +456,7 @@ int resolve_task_offset()
     int cred_offset[2];
     int cred_offset_idx = 0;
     init_cred = get_task_cred(init_task); // todo: get_task_cred not export
-    log_boot("    init_cred addr: %llx\n", init_cred);
+    log_boot("    init_cred addr: %llx\n", (unsigned long long)init_cred);
     for (uintptr_t i = (uintptr_t)init_task; i < (uintptr_t)init_task + TASK_STRUCT_MAX_SIZE; i += sizeof(uint32_t)) {
         uintptr_t val = *(uintptr_t *)i;
         if (val == (uintptr_t)init_cred) {
@@ -463,9 +519,23 @@ int resolve_task_offset()
 int resolve_current()
 {
     log_boot("current: \n");
-    uint64_t sp_el0, sp;
+    uint64_t sp_el0;
+    uint32_t sp32;
+#if defined(CONFIG_ARM)
+    /*
+     * AArch32 has no SP_EL0.  The register that holds `current` in kernel mode
+     * is TPIDRPRW (CP15 c13,c0,3) -- see asm/current.h -- so probe it exactly
+     * the way the AArch64 path probes SP_EL0.  Under the legacy
+     * !THREAD_INFO_IN_TASK layout it holds something else and the probe below
+     * classifies it as "useless", which is the correct outcome there: current
+     * is then reached through the thread_info at the base of the kernel stack.
+     */
+    sp_el0 = read_tpidrprw();
+#else
     asm volatile("mrs %0, sp_el0" : "=r"(sp_el0));
-    asm volatile("mov %0, sp" : "=r"(sp));
+#endif
+    asm volatile("mov %0, sp" : "=r"(sp32));
+    uint64_t sp = sp32;
 
     log_boot("    sp_el0: %llx\n", sp_el0);
     log_boot("    sp: %llx\n", sp);
@@ -482,20 +552,47 @@ int resolve_current()
     init_thread_union_addr = 0;
 #endif
 
-    log_boot("    init_task addr lookup: %llx\n", init_task);
+    log_boot("    init_task addr lookup: %llx\n", (unsigned long long)init_task);
     log_boot("    init_thread_union addr lookup: %llx\n", init_thread_union_addr);
+#if defined(CONFIG_ARM)
+    /*
+     * arm32: THREAD_SIZE = PAGE_SIZE << THREAD_SIZE_ORDER (arch/arm/include/
+     * asm/thread_info.h -> order 1, i.e. 0x2000, when KASAN is off) and
+     * end_of_stack() == (struct thread_info *)(task_thread_info(p) + 1)
+     * (include/linux/sched/task_stack.h), so the kernel writes STACK_END_MAGIC
+     * at stack_base + sizeof(struct thread_info) -- NOT at stack_base.  The
+     * scan below therefore matches with any candidate >= the real size and
+     * used to latch onto 0x4000 for an 8 KiB stack; every task then computed
+     * its thread_info 8 KiB below its own stack and read a stale neighbour
+     * task_struct (silently wrong current/uid) or unmapped garbage (oops).
+     * The linker hands us the exact value: __end_init_task -
+     * __start_init_task is INIT_TASK_DATA(THREAD_SIZE) (plus init_task itself
+     * when CONFIG_ARCH_TASK_STRUCT_ON_STACK), so round down to a power of two.
+     */
+    uint32_t arm_thread_size = 0;
+    uint64_t init_task_data_start = kallsyms_lookup_name("__start_init_task");
+    uint64_t init_task_data_end = kallsyms_lookup_name("__end_init_task");
+    if (init_task_data_start && init_task_data_end > init_task_data_start &&
+        (init_task_data_end - init_task_data_start) <= 0x10000) {
+        uint32_t sz = (uint32_t)(init_task_data_end - init_task_data_start);
+        while (sz & (sz - 1)) sz &= sz - 1;
+        arm_thread_size = sz;
+    }
+    log_boot("    arm32 THREAD_SIZE: %x (init_task_data %llx..%llx)\n", arm_thread_size,
+             (unsigned long long)init_task_data_start, (unsigned long long)init_task_data_end);
+#endif
 
     if (is_kimg_range(sp_el0)) {
         if (sp_el0 == init_thread_union_addr) {
             sp_el0_is_thread_info = 1;
             log_boot("    sp_el0: current_thread_info\n");
-        } else if ((uint64_t)init_task == sp_el0 || (sp_el0 & (page_size - 1)) ||
+        } else if ((uintptr_t)init_task == (uintptr_t)sp_el0 || (sp_el0 & (page_size - 1)) ||
                    (task_struct_offset.comm_offset = find_swapper_comm_offset(sp_el0, TASK_STRUCT_MAX_SIZE)) > 0) {
             sp_el0_is_current = 1;
-            init_task = (struct task_struct *)sp_el0;
+            init_task = (struct task_struct *)(uintptr_t)sp_el0;
 
             log_boot("    sp_el0: current\n");
-            log_boot("    init_task addr: %llx\n", init_task);
+            log_boot("    init_task addr: %llx\n", (unsigned long long)init_task);
             if (task_struct_offset.comm_offset > 0) {
                 log_boot("    comm_offset of task: %x\n", task_struct_offset.comm_offset);
             }
@@ -510,14 +607,25 @@ int resolve_current()
 
     // THREAD_SIZE and end_of_stack and CONFIG_THREAD_INFO_IN_TASK
     // don't worry, we use little stack until here
-    int thread_shift_cand[] = { 14, 15, 16 };
+    int thread_shift_cand[] = { 14, 15, 13, 16, 12 };
     for (int i = 0; i < sizeof(thread_shift_cand) / sizeof(thread_shift_cand[0]); i++) {
         int tsz = 1 << thread_shift_cand[i];
+#if defined(CONFIG_ARM)
+        /* arm32: only the linker-derived size is trustworthy */
+        if (arm_thread_size && tsz != (int)arm_thread_size) continue;
+#endif
         uint64_t sp_low = sp & ~(tsz - 1);
         // uint64_t sp_high = sp_low + tsz; // user_stack_pointer
         uint64_t psp = sp_low;
-        for (; psp < sp_low + THREAD_INFO_MAX_SIZE; psp += sizeof(uint32_t)) {
-            if (*(uint64_t *)psp == STACK_END_MAGIC) {
+        for (; psp < sp_low + tsz; psp += sizeof(uint32_t)) {
+            /*
+             * STACK_END_MAGIC is written by the kernel as an `unsigned long`
+             * (set_task_stack_end_magic stores it through an unsigned long *),
+             * so read it at exactly that width: on ILP32 a uint64_t read would
+             * compare the magic together with the adjacent word and never
+             * match.  On LP64 the two are the same read.
+             */
+            if (*(unsigned long *)(uintptr_t)psp == (unsigned long)STACK_END_MAGIC) {
                 if (psp == sp_low) {
                     thread_size = tsz;
                     stack_end_offset = 0;
@@ -547,6 +655,18 @@ int resolve_current()
      * Only take this path when sp_el0 identified current as task_struct.  If
      * sp_el0 is thread_info, an absent magic also means we cannot safely infer
      * the end_of_stack offset used by old !THREAD_INFO_IN_TASK kernels. */
+#if defined(CONFIG_ARM)
+    if (!thread_size && arm_thread_size) {
+        /* set_task_stack_end_magic() may be compiled out (no magic in the init
+         * stack); keep the linker-derived size and bound the thread_info scan
+         * to a maximum sizeof(struct thread_info). */
+        thread_size = arm_thread_size;
+        stack_end_offset = 0x400;
+        thread_info_in_task = 0;
+        log_boot("    arm32 stack size from linker (no magic): %x\n", thread_size);
+    }
+#endif
+#if !defined(CONFIG_ARM)
     if (!thread_size && init_thread_union_addr && sp_el0_is_current) {
         for (int i = 0; i < sizeof(thread_shift_cand) / sizeof(thread_shift_cand[0]); i++) {
             int tsz = 1 << thread_shift_cand[i];
@@ -560,14 +680,22 @@ int resolve_current()
             break;
         }
     }
+#endif
 
     /* Keep the historical arm64 default as a last-resort compatibility path
      * for kernels that hide init_thread_union from kallsyms. */
     if (!thread_size) {
+#if defined(CONFIG_ARM)
+        /* arm32 default: PAGE_SIZE << THREAD_SIZE_ORDER (order 1, KASAN off) */
+        thread_size = 0x2000;
+        stack_end_offset = 0x400;
+        thread_info_in_task = 0;
+#else
         thread_size = 0x4000;
         stack_end_offset = 0;
         thread_info_in_task = 1;
-        log_boot("    stack size fallback to arm64 default: %x\n", thread_size);
+#endif
+        log_boot("    stack size fallback: %x\n", thread_size);
     }
 
     log_boot("    thread_size: %x\n", thread_size);
@@ -576,23 +704,29 @@ int resolve_current()
 
     // task_in_thread_info_offset, 16 generally, see thread_info_be490
     if (!thread_info_in_task) {
-        uint64_t thread_info_addr = (uint64_t)current_thread_info_sp();
+        /*
+         * Pointer-sized, not uint64_t: what is searched for is a
+         * task_struct * and the cell holding it is one pointer wide.  On ILP32
+         * a uint64_t read also picks up the neighbouring word, so the
+         * comparison would silently never match.
+         */
+        uintptr_t thread_info_addr = (uintptr_t)current_thread_info_sp();
         if (init_task) {
-            for (uint64_t ptr = thread_info_addr; ptr < thread_info_addr + stack_end_offset; ptr += sizeof(uint32_t)) {
-                uint64_t pv = *(uint64_t *)ptr;
-                if (pv == (uint64_t)init_task) {
+            for (uintptr_t ptr = thread_info_addr; ptr < thread_info_addr + stack_end_offset; ptr += sizeof(uint32_t)) {
+                uintptr_t pv = *(uintptr_t *)ptr;
+                if (pv == (uintptr_t)init_task) {
                     task_in_thread_info_offset = ptr - thread_info_addr;
                     break;
                 }
             }
         } else { // unlikely
-            for (uint64_t ptr = thread_info_addr; ptr < thread_info_addr + stack_end_offset; ptr += sizeof(uint32_t)) {
-                uint64_t pv = *(uint64_t *)ptr;
+            for (uintptr_t ptr = thread_info_addr; ptr < thread_info_addr + stack_end_offset; ptr += sizeof(uint32_t)) {
+                uintptr_t pv = *(uintptr_t *)ptr;
                 task_struct_offset.comm_offset = find_swapper_comm_offset(pv, TASK_STRUCT_MAX_SIZE);
                 if (task_struct_offset.comm_offset > 0) {
                     init_task = (struct task_struct *)pv;
                     task_in_thread_info_offset = ptr - thread_info_addr;
-                    log_boot("    init_task addr: %llx\n", init_task);
+                    log_boot("    init_task addr: %llx\n", (unsigned long long)init_task);
                     log_boot("    comm_offset of task: %x\n", task_struct_offset.comm_offset);
                 }
             }
@@ -601,7 +735,7 @@ int resolve_current()
     }
 
     if (task_struct_offset.comm_offset <= 0) {
-        task_struct_offset.comm_offset = find_swapper_comm_offset((uint64_t)init_task, TASK_STRUCT_MAX_SIZE);
+        task_struct_offset.comm_offset = find_swapper_comm_offset((uintptr_t)init_task, TASK_STRUCT_MAX_SIZE);
         log_boot("    comm_offset of task: %x\n", task_struct_offset.comm_offset);
     }
 

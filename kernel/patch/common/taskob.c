@@ -232,12 +232,12 @@ int task_observer()
     unsigned long copy_process_addr = patch_config->copy_process;
     if (copy_process_addr) {
         rc |= hook_wrap8((void *)copy_process_addr, 0, after_copy_process, 0);
-        log_boot("hook copy_process: %llx, rc: %d\n", copy_process_addr, rc);
+        log_boot("hook copy_process: %llx, rc: %d\n", (unsigned long long)copy_process_addr, rc);
     } else {
         unsigned long cgroup_post_fork_addr = patch_config->cgroup_post_fork;
         if (cgroup_post_fork_addr) {
             rc |= hook_wrap4((void *)cgroup_post_fork_addr, 0, after_cgroup_post_fork, 0);
-            log_boot("hook cgroup_post_fork: %llx, rc: %d\n", cgroup_post_fork_addr, rc);
+            log_boot("hook cgroup_post_fork: %llx, rc: %d\n", (unsigned long long)cgroup_post_fork_addr, rc);
         } else {
             rc = HOOK_BAD_ADDRESS;
         }
@@ -247,7 +247,7 @@ int task_observer()
     unsigned long do_exit_addr = kallsyms_lookup_name("do_exit");
     if (do_exit_addr) {
         rc |= hook_wrap1((void *)do_exit_addr, before_do_exit, 0, 0);
-        log_boot("hook do_exit: %llx, rc: %d\n", do_exit_addr, rc);
+        log_boot("hook do_exit: %llx, rc: %d\n", (unsigned long long)do_exit_addr, rc);
     } else {
         log_boot("hook do_exit: addr=0 NOT FOUND\n");
     }

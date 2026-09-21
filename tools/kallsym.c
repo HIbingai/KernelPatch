@@ -478,13 +478,15 @@ static int find_approx_offsets(kallsym_t *info, char *img, int32_t imglen)
 static int32_t find_approx_addresses_or_offset(kallsym_t *info, char *img, int32_t imglen)
 {
     int32_t ret = 0;
-    if ((info->arch == ARM64 || info->arch == X86_64) && info->is_64) {
+    if (((info->arch == ARM64 || info->arch == X86_64) && info->is_64) || info->arch == ARM_LE) {
         /*
          * Vendor arm64 kernels can carry kallsyms_offsets even on older
          * version strings such as 4.4, so don't gate the relative-base path
-         * purely on the reported kernel version.
+         * purely on the reported kernel version. 32-bit ARM (ARM_LE) 4.x/4.9
+         * kernels are also commonly CONFIG_KALLSYMS_BASE_RELATIVE, so try the
+         * offsets path for them too (offsets are 4-byte regardless of arch).
          */
-        tools_logi("try kallsyms_offsets first for 64-bit relative-base kernel\n");
+        tools_logi("try kallsyms_offsets first for relative-base kernel\n");
         ret = find_approx_offsets(info, img, imglen);
         if (!ret) return 0;
     }

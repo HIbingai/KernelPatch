@@ -1,7 +1,51 @@
 #ifndef _KP_BARRIER_H_
 #define _KP_BARRIER_H_
 
-#ifdef CONFIG_X86_64
+#ifdef CONFIG_ARM
+
+/*
+ * AArch32 (ARMv7-A). ARMv7 has DSB/DMB/ISB but no acquire/release loads
+ * (LDAR/STLR are ARMv8-only), so smp_load_acquire/smp_store_release are
+ * built from a DMB plus an ordinary access, which is what arch/arm does.
+ * The full-system barriers use "sy"; the SMP ones use the inner-shareable
+ * domain, matching arch/arm/include/asm/barrier.h.
+ */
+/*
+ * ARMv7 only implements the SY / ST / ISH / ISHST / NSH / NSHST / OSH / OSHST
+ * forms of DMB and DSB. The "load-limited" variants (dmb ishld, dmb oshld) and
+ * the plain "dsb ld" are ARMv8 additions and do NOT assemble under
+ * -march=armv7-a, so the read barriers use the full barrier instead.
+ */
+#define mb() asm volatile("dsb sy" ::: "memory")
+#define wmb() asm volatile("dsb st" ::: "memory")
+#define rmb() asm volatile("dsb sy" ::: "memory")
+
+#define smp_mb() asm volatile("dmb ish" ::: "memory")
+#define smp_wmb() asm volatile("dmb ishst" ::: "memory")
+#define smp_rmb() asm volatile("dmb ish" ::: "memory")
+
+#define dma_wmb() asm volatile("dmb oshst" ::: "memory")
+#define dma_rmb() asm volatile("dmb osh" ::: "memory")
+#define dma_mb() asm volatile("dmb osh" ::: "memory")
+
+#define smp_store_release(p, v) \
+    do {                        \
+        smp_mb();               \
+        *(p) = (v);             \
+    } while (0)
+
+#define smp_load_acquire(p)      \
+    ({                           \
+        typeof(*(p)) __v = *(p); \
+        smp_mb();                \
+        __v;                     \
+    })
+
+/* ARMv7 has no single instruction for a release store; use DMB + store. */
+#define __smp_store_release(p, v) smp_store_release(p, v)
+#define __smp_load_acquire(p) smp_load_acquire(p)
+
+#elif defined(CONFIG_X86_64)
 
 #define mb()  asm volatile("mfence" ::: "memory")
 #define wmb() asm volatile("sfence" ::: "memory")
@@ -99,6 +143,6 @@
         __u.__val;                                                                      \
     })
 
-#endif /* CONFIG_X86_64 */
+#endif /* CONFIG_ARM / CONFIG_X86_64 / ARM64 */
 
 #endif

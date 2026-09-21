@@ -358,10 +358,10 @@ void syscall_init()
     }
 
     sys_call_table = (typeof(sys_call_table))kallsyms_lookup_name("sys_call_table");
-    log_boot("sys_call_table addr: %llx\n", sys_call_table);
+    log_boot("sys_call_table addr: %llx\n", (unsigned long long)sys_call_table);
 
     compat_sys_call_table = (typeof(compat_sys_call_table))kallsyms_lookup_name("compat_sys_call_table");
-    log_boot("compat_sys_call_table addr: %llx\n", compat_sys_call_table);
+    log_boot("compat_sys_call_table addr: %llx\n", (unsigned long long)compat_sys_call_table);
 
     has_config_compat = 0;
     has_syscall_wrapper = 0;

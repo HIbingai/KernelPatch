@@ -12,6 +12,10 @@
 #include <uapi/asm-generic/errno.h>
 #include <uapi/asm-generic/unistd.h>
 
+#ifndef __user
+#define __user
+#endif
+
 extern int has_syscall_wrapper;
 extern struct
 {
@@ -47,7 +51,7 @@ static inline uint64_t *syscall_args(void *hook_fargs)
 {
     uint64_t *args;
     if (has_syscall_wrapper) {
-        args = ((struct pt_regs *)((hook_fargs0_t *)hook_fargs)->args[0])->regs;
+        args = (uint64_t *)((struct pt_regs *)((hook_fargs0_t *)hook_fargs)->args[0])->regs;
     } else {
         args = ((hook_fargs0_t *)hook_fargs)->args;
     }

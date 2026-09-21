@@ -17,8 +17,16 @@
 #include <module.h>
 #include <user_event.h>
 #include <log.h>
-#ifdef ANDROID
-#include <userd.h>
+#include <userd.h> /* is_trusted_manager_uid() is used on every arch, not only ANDROID */
+
+/*
+ * User argv[] slots are pointer-sized: 8 bytes on LP64, 4 bytes on AArch32
+ * (ILP32).  The literal 8 is kept verbatim for the non-ARM builds.
+ */
+#if defined(CONFIG_ARM)
+#define SUPERCMD_ARGV_STEP 4
+#else
+#define SUPERCMD_ARGV_STEP 8
 #endif
 
 static char *__user supercmd_str_to_user_sp(const char *data, uintptr_t *sp)
@@ -369,14 +377,20 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
         if (a[0] == '-' && a[1] == 'c') break;
     }
 
+#if defined(CONFIG_ARM)
+    /* AArch32 (ILP32): uintptr_t is 4 bytes; uint64_t would not match the
+     * uintptr_t * helpers below. */
+    uintptr_t sp = current_user_stack_pointer();
+#else
     uint64_t sp = current_user_stack_pointer();
+#endif
 
     // if no any more
     if (!parr[2]) {
         supercmd_exec(u_filename_p, sh_path, &sp);
         const char *__user argv1 = supercmd_str_to_user_sp(sh_path, &sp);
         set_user_arg_ptr(0, *uargv, 1, (uintptr_t)argv1);
-        *uargv += 1 * 8;
+        *uargv += 1 * SUPERCMD_ARGV_STEP;
         commit_su(profile.to_uid, profile.scontext);
         return;
     }
@@ -436,7 +450,7 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
 
     if (!cmd) {
         supercmd_exec(u_filename_p, sh_path, &sp);
-        *uargv += pi * 8;
+        *uargv += pi * SUPERCMD_ARGV_STEP;
         goto free;
     }
 
@@ -444,7 +458,7 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
         cmd_res.msg = supercmd_help;
     } else if (!strcmp("-c", cmd)) {
         supercmd_exec(u_filename_p, sh_path, &sp);
-        *uargv += (carr - parr - 1) * 8;
+        *uargv += (carr - parr - 1) * SUPERCMD_ARGV_STEP;
         goto free;
     } else if (!strcmp("exec", cmd)) {
         if (!carr[1]) {
@@ -452,7 +466,7 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
             goto echo;
         }
         supercmd_exec(u_filename_p, carr[1], &sp);
-        *uargv += (carr - parr + 1) * 8;
+        *uargv += (carr - parr + 1) * SUPERCMD_ARGV_STEP;
         goto free;
     } else if (!strcmp("version", cmd)) {
         supercmd_echo(u_filename_p, uargv, &sp, "%x,%x", kver, kpver);

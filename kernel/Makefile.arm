@@ -1,0 +1,151 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# KernelPatch AArch32 (ARMv7-A) port — M1 skeleton build.
+#
+#   make -f Makefile.arm                       # uses arm-none-eabi-
+#   make -f Makefile.arm CROSS=arm-linux-gnueabi-
+#
+# Produces: kpimg-arm (raw ARM blob) + kpimg-arm.elf (for readelf inspection).
+# M0-confirmed target: ARMv7-A, ARM (A32) mode, non-LPAE. See port/device_facts.md.
+
+CROSS   ?= arm-linux-gnueabi-
+CC       = $(CROSS)gcc
+LD       = $(CROSS)ld
+OBJCOPY  = $(CROSS)objcopy
+READELF  = $(CROSS)readelf
+
+# Freestanding, bare-metal ARM. ARM mode (not Thumb), no libc, no PIC.
+# (No -nostdinc: unlike the aarch64 build we have no vendored arm kernel
+# headers, so we use the toolchain's freestanding <stdint.h>/<stddef.h>.)
+#
+# NOTE: -fno-pic below is correct ONLY for the frozen M4a/M4b scaffold target
+# (kpimg-arm), which is hand-written A32 assembly that computes its own delta.
+# The FULL PORT must NOT use it — see ARM_FULL_CFLAGS.
+ARM_CFLAGS  := -Wall -fno-builtin -std=gnu11 -ffreestanding
+ARM_CFLAGS  += -marm -march=armv7-a -mno-unaligned-access -fno-pic
+ARM_CFLAGS  += -fno-stack-protector -g -Os -DCONFIG_ARM
+ARM_INCLUDE := -I. -Iinclude -Ipatch/include
+
+# MAP_DEBUG is UPSTREAM KernelPatch's own early-boot marker facility (see
+# kernel/Makefile, which defines it only under `ifdef DEBUG`).  It prints
+# `KP: <idx>-<val>` lines and enlarges map_data_t in base/setup.h, so it must
+# stay OFF in the shipped blob and be opted into explicitly:
+#     make -f Makefile.arm full DEBUG=1
+# base/setup_arm.S is assembled with the same ARM_CFLAGS, so the assembler's
+# offset macros in base/setup.h and the C struct layout stay consistent either
+# way -- that is why this can be flipped without touching the source.
+ifdef DEBUG
+    ARM_CFLAGS += -DDEBUG -DMAP_DEBUG
+endif
+ifdef ANDROID
+    ARM_CFLAGS += -DANDROID
+endif
+
+TARGET   := kpimg-arm
+ARM_OBJS := arm/setup1.o arm/map.o base/setup.o   # M4a: += (full map/start/hook)
+
+all: $(TARGET)
+
+$(TARGET): $(TARGET).elf
+	$(OBJCOPY) -O binary -S $< $@
+	@echo "== $(TARGET) built =="
+	@$(READELF) -h $(TARGET).elf | grep -E 'Machine|Class|Flags' || true
+
+$(TARGET).elf: $(ARM_OBJS) kpimg-arm.lds
+	$(LD) -nostdlib -static -no-pie -Tkpimg-arm.lds -o $@ $(ARM_OBJS)
+
+arm/%.o: arm/%.S
+	$(CC) $(ARM_CFLAGS) $(ARM_INCLUDE) -c -o $@ $<
+
+arm/%.o: arm/%.c
+	$(CC) $(ARM_CFLAGS) $(ARM_INCLUDE) -c -O2 -o $@ $<
+
+base/%.o: base/%.c
+	$(CC) $(ARM_CFLAGS) $(ARM_INCLUDE) -c -O2 -o $@ $<
+
+.PHONY: all clean
+clean:
+	rm -f arm/*.o base/*.o base/puff/*.arm.o patch/*.arm.o \
+	      patch/common/*.arm.o patch/module/*.arm.o patch/ksyms/*.arm.o \
+	      $(TARGET) $(TARGET).elf
+
+# =====================================================================
+# Full-port inventory build.
+#
+# `make -f Makefile.arm full -k` compiles the *entire* upstream source set
+# (base/*.c + patch/**/*.c) for AArch32. It is expected to fail loudly at
+# first: every error names one concrete thing that still assumes arm64 or
+# x86. Run it with -k to get the complete list in one pass.
+# =====================================================================
+ARM_FULL_INCLUDE := -I. -Iinclude -Ipatch/include \
+                    -Ilinux -Ilinux/include -Ilinux/arch/arm/include \
+                    -Ilinux/include/uapi/asm-generic
+
+# ---------------------------------------------------------------------
+# Position independence is REQUIRED for the full port, not an optimisation.
+#
+# base/start.c does `runtime_base_addr = (unsigned long)_link_base;` and
+# `_link_base` is a SECTION symbol (nm: `D`), so this only yields _link_base's
+# RUNTIME address — the value include/symbol.h's link2runtime() needs — when the
+# compiler emits a PC-relative reference.  With -fno-pic the literal pool bakes
+# the link constant 0xd000, runtime_base_addr == link_base_addr, link2runtime()
+# degenerates to the identity, and the 161 `.kp.symbol` addresses plus the 703
+# `.data.rel.local` addresses are left unfixed -> the kernel faults on a low VA.
+# AArch64 never needed this because adrp/add is PC-relative by construction.
+#
+# -fvisibility=hidden alone does NOT work (measured on base/start.c:
+# -fPIC -> 55 GOT_BREL+7 BASE_PREL; -fPIC -fvisibility=hidden -> 7 GOT_BREL+2
+# BASE_PREL, which trips `ASSERT(SIZEOF(.got) == 0)` in kpimg-arm-full.lds).
+# The DECLARATIONS must be hidden, which is what the forced-include pragma
+# header does.  Result: 0 GOT in every object, all path ASSERTs pass.
+ARM_FULL_CFLAGS := $(filter-out -fno-pic,$(ARM_CFLAGS))
+ARM_FULL_CFLAGS += -fPIC -fvisibility=hidden -include include/kp_visibility_arm.h
+# ---------------------------------------------------------------------
+
+ARM_FULL_SRCS := \
+    base/setup.c base/tlsf.c base/start.c base/map.c base/hook.c \
+    base/fphook.c base/hotpatch.c base/hmem.c base/predata.c \
+    base/puff/puff.c base/symbol.c base/baselib.c base/sha256.c \
+    $(wildcard patch/*.c) \
+    $(wildcard patch/common/*.c) \
+    $(wildcard patch/module/*.c) \
+    $(wildcard patch/ksyms/*.c)
+
+ARM_FULL_OBJS := $(ARM_FULL_SRCS:.c=.arm.o)
+
+.PHONY: full
+full: $(ARM_FULL_OBJS)
+
+%.arm.o: %.c
+	$(CC) $(ARM_FULL_CFLAGS) $(ARM_FULL_INCLUDE) -c -O2 -o $@ $<
+
+# =====================================================================
+# Full-port LINK stage.
+#
+#   make -f Makefile.arm kpimg-arm-full     # -> kpimg-arm-full.elf + blob
+#
+# Links the 36-object inventory build (ARM_FULL_OBJS) together with the A32
+# entry/setjmp assembly into one injected blob using kpimg-arm-full.lds.
+# This section is purely additive: `all`, `$(TARGET)` (= kpimg-arm, the frozen
+# M4b oracle), `full`, `%.arm.o: %.c` and `clean` above are untouched.
+# =====================================================================
+
+ARM_FULL_ASM_OBJS := base/setup_arm.arm.o base/puff/setjmp_arm.arm.o
+ARM_FULL_LINK_OBJS := $(ARM_FULL_OBJS) $(ARM_FULL_ASM_OBJS)
+ARM_FULL_TARGET := kpimg-arm-full
+
+.PHONY: full-link
+full-link: $(ARM_FULL_TARGET)
+
+$(ARM_FULL_TARGET): $(ARM_FULL_TARGET).elf
+	$(OBJCOPY) -O binary -S $< $@
+	@echo "== $(ARM_FULL_TARGET) built =="
+	@$(READELF) -h $(ARM_FULL_TARGET).elf | grep -E 'Machine|Class|Flags' || true
+
+$(ARM_FULL_TARGET).elf: $(ARM_FULL_LINK_OBJS) kpimg-arm-full.lds
+	$(LD) -nostdlib -static -no-pie -Tkpimg-arm-full.lds -o $@ $(ARM_FULL_LINK_OBJS)
+
+# A32 assembly counterpart of the `%.arm.o: %.c` rule above.  The target
+# pattern is `%.arm.o`, so the M4 `arm/%.o` rules are unaffected.  Assembly is
+# unaffected by -fPIC; the forced-include header is __ASSEMBLY__-guarded.
+%.arm.o: %.S
+	$(CC) $(ARM_FULL_CFLAGS) $(ARM_FULL_INCLUDE) -c -o $@ $<

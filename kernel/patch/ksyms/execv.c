@@ -38,6 +38,22 @@ static void before_execve(hook_fargs3_t *args, void *udata)
     unsigned long stack = (unsigned long)get_stack(current);
     uintptr_t addr = (uintptr_t)(thread_size + stack);
 
+#ifdef CONFIG_ARM
+    /*
+     * AArch32 has exactly one pt_regs layout and task_pt_regs() pins it to the
+     * very top of the kernel stack, so there is nothing to search for -- unlike
+     * arm64, which has three candidate layouts to tell apart.
+     *
+     * The syscall number lives in r7, which `syscallno` already aliases.  The
+     * arm64 `regs[8] == nr` test reads x8 and has no AArch32 counterpart: it
+     * would compile fine and silently never match.
+     */
+    struct pt_regs *regs = (struct pt_regs *)(addr - sizeof(struct pt_regs));
+
+    if (regs->orig_x0 == arg0 && regs->syscallno == nr) {
+        pt_regs_offset = sizeof(struct pt_regs);
+    }
+#else
     for (uintptr_t i = addr - sizeof(struct pt_regs) - 0x40; i < addr - 32 * 8; i += sizeof(uint32_t)) {
         uintptr_t val0 = *(uintptr_t *)i;
         uintptr_t val1 = *(uintptr_t *)(i + 0x8);
@@ -51,6 +67,7 @@ static void before_execve(hook_fargs3_t *args, void *udata)
             }
         }
     }
+#endif
     log_boot("    pt_regs offset: %x\n", pt_regs_offset);
 }
 

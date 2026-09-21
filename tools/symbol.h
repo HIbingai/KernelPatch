@@ -16,6 +16,14 @@
 
 int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol);
 int32_t get_symbol_offset_exit(kallsym_t *info, char *img, char *symbol);
+/* Arm32 vendor kernels may omit the linker-defined _end/__bss_stop from
+ * kallsyms.  Every bss symbol lies inside bss, so the highest bss symbol is a
+ * measurable lower bound on _end.  Returns 0 when no bss symbol exists. */
+/* Arm32: find the highest aligned, all-zero, symbol-free region of map_size
+ * bytes strictly below ceiling_off.  Returns 0 when none exists. */
+int32_t search_zero_map_region(kallsym_t *kallsym, char *img_buf, int32_t img_len, int32_t ceiling_off,
+                               int32_t map_size, int32_t map_align);
+int32_t get_bss_extent_symbol_offset(kallsym_t *kallsym, char *img_buf);
 int32_t find_suffixed_symbol(kallsym_t *kallsym, char *img_buf, const char *symbol);
 bool is_usable_symbol_offset(int32_t offset, int imglen);
 int32_t get_usable_symbol_offset_try(kallsym_t *kallsym, char *img_buf, int imglen, const char *symbol);

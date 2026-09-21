@@ -385,7 +385,7 @@ static int selinux_hide_install_hooks(void)
 
     }else{
         log_boot("selinux_hide: using fp_hook to hook write_op\n");
-        write_op = lookup_name_with_suffix("write_op");
+        write_op = (sel_write_op_fn *)lookup_name_with_suffix("write_op");
         if (!write_op) {
             rc = -ENOENT;
             log_boot("selinux_hide: write_op not found\n");
@@ -546,8 +546,11 @@ int selinux_hide_init(void)
     selinux_setprocattr_addr = lookup_name_with_suffix("selinux_setprocattr");
 
     log_boot("selinux_hide: sel_write_context: %llx, sel_write_access: %llx, selinux_setprocattr: %llx\n",
-             sel_write_context_addr, sel_write_access_addr, selinux_setprocattr_addr);
+             (unsigned long long)sel_write_context_addr, (unsigned long long)sel_write_access_addr,
+             (unsigned long long)selinux_setprocattr_addr);
     log_boot("selinux_hide: sel_read_handle_status: %llx, sel_mmap_handle_status: %llx, cred_getsecid: %llx\n",
-             sel_read_handle_status_addr, sel_mmap_handle_status_addr, (unsigned long)kp_security_cred_getsecid);
+             (unsigned long long)sel_read_handle_status_addr,
+             (unsigned long long)sel_mmap_handle_status_addr,
+             (unsigned long long)(unsigned long)kp_security_cred_getsecid);
     return 0;
 }

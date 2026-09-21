@@ -123,12 +123,25 @@ long compat_strncpy_from_user(char *dest, const char __user *src, long count)
 }
 KP_EXPORT_SYMBOL(compat_strncpy_from_user);
 
+#if defined(CONFIG_ARM)
+/*
+ * AArch32 has a single, stable struct pt_regs layout: 18 x 32-bit words ==
+ * 72 bytes, sitting at the top of the kernel stack.  The per-kernel-version
+ * AArch64 layout probes below do not apply.  The execv.c ksym probe may still
+ * refine this at runtime.
+ */
+int16_t pt_regs_offset = sizeof(struct pt_regs);
+#else
 int16_t pt_regs_offset = -1;
+#endif
 
 struct pt_regs *_task_pt_reg(struct task_struct *task)
 {
     unsigned long stack = (unsigned long)task_stack_page(task);
     uintptr_t addr = (uintptr_t)(thread_size + stack);
+#if defined(CONFIG_ARM)
+    addr -= pt_regs_offset;
+#else
     if (pt_regs_offset > 0) {
         addr -= pt_regs_offset;
     } else {
@@ -145,6 +158,7 @@ struct pt_regs *_task_pt_reg(struct task_struct *task)
             addr -= sizeof(struct pt_regs); // 0x150
         }
     }
+#endif
 
     return (struct pt_regs *)(addr);
 }

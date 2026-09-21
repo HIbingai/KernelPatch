@@ -120,7 +120,13 @@ static int hotpatch_cb(void *arg)
 static inline int is_interrupt_masked()
 {
     unsigned long daif;
+#if defined(CONFIG_ARM)
+    /* AArch32 has no DAIF register: the IRQ/FIQ mask bits live in CPSR
+     * (bit7 = I, bit6 = F), so `& 0xC0` below keeps its meaning. */
+    asm volatile("mrs %0, cpsr" : "=r"(daif));
+#else
     asm volatile("mrs %0, daif" : "=r"(daif));
+#endif
     // https://developer.arm.com/documentation/ddi0601/latest/AArch64-Registers/DAIF--Interrupt-Mask-Bits
     return daif & 0xC0;
 }
@@ -189,6 +195,6 @@ int hotpatch_init()
         alias_entry = pgtable_entry_kernel((uintptr_t)alias_page);
         if (alias_entry) alias_pte = *alias_entry;
     }
-    log_boot("hotpatch backend: framework (alias_page: %llx, alias_pte: %llx)\n", alias_page, alias_pte);
+    log_boot("hotpatch backend: framework (alias_page: %llx, alias_pte: %llx)\n", (unsigned long long)alias_page, (unsigned long long)alias_pte);
     return 0;
 }

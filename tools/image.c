@@ -58,6 +58,22 @@ int32_t get_kernel_info(kernel_info_t *kinfo, const char *img, int32_t imglen)
 {
     kinfo->is_be = 0;
 
+    // aarch32 port: a raw 32-bit ARM Image/zImage has no arm64 header. Its
+    // entry is the very first instruction (head.S stext, an ARM b/bl). Fill
+    // kinfo directly instead of parsing the arm64 arm64_hdr_t.
+    if (is_arm32_kernel_image(img, imglen)) {
+        kinfo->is_arm32 = 1;
+        kinfo->uefi = 0;
+        kinfo->is_be = 0;
+        kinfo->b_stext_insn_offset = 0; // entry at offset 0
+        kinfo->primary_entry_offset = 0;
+        kinfo->load_offset = 0x8000; // ARM TEXT_OFFSET (informational)
+        kinfo->kernel_size = imglen; // no header size field; use full image
+        kinfo->page_shift = 12; // M0: non-LPAE, 4K pages
+        tools_logi("arm32 kernel image, size: 0x%08x, entry offset: 0x0\n", imglen);
+        return 0;
+    }
+
     arm64_hdr_t *khdr = (arm64_hdr_t *)img;
     if (strncmp(khdr->magic, KERNEL_MAGIC, strlen(KERNEL_MAGIC))) {
         tools_loge_exit("kernel image magic error: %s\n", khdr->magic);
@@ -119,5 +135,22 @@ int32_t kernel_resize(kernel_info_t *kinfo, char *img, int32_t size)
     uint64_t ksize = size;
     if (is_be() ^ kinfo->is_be) ksize = u64swp(size);
     khdr->kernel_size_le = ksize;
+    return 0;
+}
+
+// A 32-bit ARM kernel (Image/zImage) carries no arm64 "ARM\x64" header magic.
+// Detect it so kptools can select the ARM_LE (aarch32) analysis path.
+// Signals: no arm64 magic at 0x38, and either the ARM zImage magic 0x016f2818
+// at 0x24, or an ARM (A32) B/BL as the very first instruction (decompressed
+// Image head, e.g. head.S `b stext`).
+int32_t is_arm32_kernel_image(const char *img, int32_t imglen)
+{
+    if (imglen < 0x40) return 0;
+    const arm64_hdr_t *khdr = (const arm64_hdr_t *)img;
+    if (!strncmp(khdr->magic, KERNEL_MAGIC, strlen(KERNEL_MAGIC))) return 0; // arm64
+    uint32_t zmagic = u32le(*(const uint32_t *)(img + 0x24));
+    if (zmagic == 0x016f2818u) return 1; // ARM zImage
+    uint32_t w0 = u32le(*(const uint32_t *)img);
+    if ((w0 & 0xFE000000u) == 0xEA000000u) return 1; // ARM B(0xEA)/BL(0xEB) at entry
     return 0;
 }

@@ -11,7 +11,16 @@
 #define PREFIX_MAX 48
 #define LOG_LINE_MAX (1024 - PREFIX_MAX)
 
-extern void (*printk)(const char *fmt, ...);
+/* Format checking, part 1 of 2: the printk POINTER.  On ILP32 (AArch32) any
+ * 32-bit value formatted with %llx makes vsnprintf read a 64-bit register
+ * pair, which silently drops the value AND desynchronises every later
+ * argument -- so it must be a compile error, not a silent boot-log lie.
+ * The logkv/logkd/... macros below expand through this pointer; GCC reports
+ * each misuse with a `note: in expansion of macro` naming the real call site,
+ * which is what port/fix_ilp32_format.py consumes.  It also reports inside
+ * this header, so DO NOT run an automated argument-cast fixer over this file
+ * (an earlier version did and corrupted the #define lines). */
+extern void (*printk)(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #define logkv(fmt, ...) printk("[+] KP V " fmt, ##__VA_ARGS__)
 // #define logkv(fmt, ...)
@@ -31,7 +40,10 @@ extern void (*printk)(const char *fmt, ...);
 #define logke(fmt, ...) printk("[-] KP E " fmt, ##__VA_ARGS__)
 #define logkfe(fmt, ...) printk("[-] KP E %s: " fmt, __func__, ##__VA_ARGS__)
 
-void log_boot(const char *fmt, ...);
+/* Format checking, part 2 of 2: the real function.  Gives precise caller
+ * locations for the log_boot() family (all the arm32 bring-up findings below
+ * came from these diagnostics). */
+void log_boot(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 const char *get_boot_log();
 
 #endif

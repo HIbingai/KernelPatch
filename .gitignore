@@ -7,3 +7,9 @@ build
 
 test
 script
+
+# arm32 port build artifacts (rebuild: make -f kernel/Makefile.arm full)
+kernel/kpimg-arm
+kernel/kpimg-arm-full
+kernel/kpimg-arm-full.good
+kernel/kpimg-arm-full.elf.good

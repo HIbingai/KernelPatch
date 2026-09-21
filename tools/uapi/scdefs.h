@@ -20,17 +20,7 @@ static inline long hash_key(const char *key)
 #define SUPERCALL_HELLO_ECHO "hello1158"
 
 // #define __NR_supercall __NR3264_truncate // 45
-// AArch32: nr45 in the *native* sys_call_table is sys_brk (used by every
-// userspace allocator low-level path) -- hooking it as the supercall entry would
-// break brk.  Use a placeholder slot instead: sys_vm86old (x86-only,
-// never issued by arm32 userspace,and empty in practice) is at nr 394/395/396
-// on the 5.15 arm32 table.  On 4.9/Android8.1 devices this number must
-// be re-validated during device bringup (pick a sys_ni_syscall/vm86old slot).
-#if defined(CONFIG_ARM)
-#define __NR_supercall 394
-#else
 #define __NR_supercall 45
-#endif
 
 #define SUPERCALL_HELLO 0x1000
 #define SUPERCALL_KLOG 0x1004

@@ -13,17 +13,46 @@ static inline unsigned long kp_local_irq_save(void)
 {
     unsigned long flags;
 
+#if defined(CONFIG_ARM)
+    /* AArch32: no DAIF register.  Save CPSR, then mask IRQ only (`cpsid i`
+     * clears CPSR.I) -- the AArch32 counterpart of arm64's `daifset, #2`. */
+    asm volatile("mrs %0, cpsr\n\t"
+                 "cpsid i"
+                 : "=r"(flags)
+                 :
+                 : "memory");
+#elif defined(CONFIG_X86_64)
+    asm volatile("pushfq\n\t"
+                 "popq %0\n\t"
+                 "cli"
+                 : "=r"(flags)
+                 :
+                 : "memory");
+#else
     asm volatile("mrs %0, daif\n\t"
                  "msr daifset, #2"
                  : "=r"(flags)
                  :
                  : "memory");
+#endif
     return flags;
 }
 
 static inline void kp_local_irq_restore(unsigned long flags)
 {
+#if defined(CONFIG_ARM)
+    /* Restore the CPSR control byte (mode + I/F), as mainline arch/arm
+     * arch_local_irq_restore() does; condition flags stay untouched. */
+    asm volatile("msr cpsr_c, %0" : : "r"(flags) : "memory");
+#elif defined(CONFIG_X86_64)
+    asm volatile("pushq %0\n\t"
+                 "popfq"
+                 :
+                 : "r"(flags)
+                 : "memory", "cc");
+#else
     asm volatile("msr daif, %0" : : "r"(flags) : "memory");
+#endif
 }
 
 static inline void kp_local_raw_spin_lock(raw_spinlock_t *lock)

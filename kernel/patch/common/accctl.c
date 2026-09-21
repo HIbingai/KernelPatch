@@ -243,7 +243,7 @@ int bypass_selinux()
     if (avc_denied_addr) {
         hook_err_t err = hook((void *)avc_denied_addr, (void *)avc_denied_replace, (void **)&avc_denied_backup);
         if (err != HOOK_NO_ERR) {
-            log_boot("hook avc_denied_addr: %llx, error: %d\n", avc_denied_addr, err);
+            log_boot("hook avc_denied_addr: %llx, error: %d\n", (unsigned long long)avc_denied_addr, err);
         }
     }
 
@@ -252,7 +252,7 @@ int bypass_selinux()
         hook_err_t err =
             hook((void *)slow_avc_audit_addr, (void *)slow_avc_audit_replace, (void **)&slow_avc_audit_backup);
         if (err != HOOK_NO_ERR) {
-            log_boot("hook slow_avc_audit: %llx, error: %d\n", slow_avc_audit_addr, err);
+            log_boot("hook slow_avc_audit: %llx, error: %d\n", (unsigned long long)slow_avc_audit_addr, err);
         }
     }
 

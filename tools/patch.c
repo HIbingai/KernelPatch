@@ -577,6 +577,42 @@ static int patch_update_x86(const char *kimg_path, const char *kpimg_path, const
     return rc;
 }
 
+/*
+ * AArch32 .setup.map placement: refuse to drop the map region on top of any
+ * kallsyms symbol.
+ *
+ * kallsyms carries no symbol sizes, so this can only check symbol *starts*.
+ * That is sufficient here because the remaining case -- a symbol starting
+ * before the page and running into it -- requires its successor to start at or
+ * after the page end, and the all-zero check on the input image immediately
+ * afterwards rejects any page that actually contains code or data.  Together
+ * the two checks generalise to kernels whose layout we have never measured
+ * (the real target is a 4.9.193 device kernel) instead of trusting that "the
+ * bytes below __init_begin are linker padding" on every kernel.
+ */
+struct arm32_map_overlap {
+    int32_t start;
+    int32_t end;
+    int32_t hit_index;
+    int32_t hit_offset;
+    char hit_symbol[KSYM_SYMBOL_LEN];
+    char hit_type;
+};
+
+static int32_t arm32_map_overlap_cb(int32_t index, char type, const char *symbol, int32_t offset, void *userdata)
+{
+    struct arm32_map_overlap *d = (struct arm32_map_overlap *)userdata;
+    if (offset >= d->start && offset < d->end) {
+        d->hit_index = index;
+        d->hit_offset = offset;
+        d->hit_type = type;
+        strncpy(d->hit_symbol, symbol, sizeof(d->hit_symbol) - 1);
+        d->hit_symbol[sizeof(d->hit_symbol) - 1] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
 int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path, const char *superkey,
                          bool root_key, const char **additional, extra_config_t *extra_configs,
                          int extra_config_num, char **out_kimg, int *out_kimg_len)
@@ -600,7 +636,6 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
 
     // kimg base info
     kernel_info_t *kinfo = &pimg.kinfo;
-    int align_kernel_size = align_ceil(kinfo->kernel_size, SZ_4K);
 
     // kimg kallsym
     char *kallsym_kimg = (char *)malloc(pimg.ori_kimg_len);
@@ -621,9 +656,59 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
 
     }
 
-    if (analyze_kallsym_info(&kallsym, kallsym_kimg, pimg.ori_kimg_len, ARM64, 1)) {
+    // aarch32 port: analyze a 32-bit ARM Image as ARM_LE / is_64=0.
+    enum arch_type patch_arch = kinfo->is_arm32 ? ARM_LE : ARM64;
+    int patch_is64 = kinfo->is_arm32 ? 0 : 1;
+    if (analyze_kallsym_info(&kallsym, kallsym_kimg, pimg.ori_kimg_len, patch_arch, patch_is64)) {
         tools_loge_exit("analyze_kallsym_info error\n");
     }
+
+    // aarch32: a raw 32-bit ARM Image carries no arm64 header, so
+    // get_kernel_info() had to fall back to kinfo->kernel_size = file length.
+    // That value EXCLUDES .bss (objcopy does not emit the NOBITS .bss into the
+    // binary), yet the kernel wipes __bss_start.._end in __mmap_switched long
+    // before paging_init runs. Placing start_offset at the file length (as
+    // arm64 does with its header image_size, which DOES include .bss) therefore
+    // drops both the appended kpimg and the relocated start image inside .bss,
+    // where they are zeroed before the paging_init hook ever sees them.
+    // Extend kernel_size to the kernel's real RAM footprint (_end - _text) and
+    // keep a 1 MiB guard so an appended DTB / ATAGS parked right after _end
+    // stays clear on real devices.
+    if (kinfo->is_arm32) {
+        int32_t end_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "_end");
+        if (!end_off) end_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "__bss_stop");
+        if (end_off <= 0) {
+            /* A vendor 32-bit ARM kernel may not carry the linker-defined
+             * _end/__bss_stop in kallsyms at all (measured on the XTC
+             * 4.9.193-perf image: both absent, while _edata = 0x163bfb8 and the
+             * highest bss symbol = 0x1889a84, i.e. the bss is ~2.4 MiB -- so
+             * "_edata + guard" would still land inside bss).  Bound the bss end
+             * from measurements instead of guessing:
+             *   - _edata / __bss_start: start of bss,
+             *   - highest kallsyms symbol of type 'b'/'B': every bss object
+             *     lies inside bss, so this is a lower bound on _end.
+             * Take the larger one; the SZ_1M guard then covers the last bss
+             * object and any appended DTB/ATAGS parked after _end. */
+            int32_t bss_start_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "_edata");
+            if (!bss_start_off) bss_start_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "__bss_start");
+            int32_t bss_max_off = get_bss_extent_symbol_offset(&kallsym, kallsym_kimg);
+            end_off = bss_start_off > bss_max_off ? bss_start_off : bss_max_off;
+            if (end_off > 0) {
+                tools_logw("arm32: no _end/__bss_stop in kallsyms; measured bss bound 0x%x (_edata 0x%x, highest bss symbol 0x%x)\n",
+                           end_off, bss_start_off, bss_max_off);
+            }
+        }
+        if (end_off > 0) {
+            if (end_off > kinfo->kernel_size) {
+                tools_logi("arm32 kernel_size: file 0x%x -> image 0x%x (+.bss) +guard 0x%x\n", kinfo->kernel_size,
+                           end_off, SZ_1M);
+                kinfo->kernel_size = align_ceil(end_off, SZ_4K) + SZ_1M;
+            }
+        } else {
+            tools_loge_exit("arm32: cannot resolve _end/__bss_stop/_edata/bss extent, start_offset would land inside .bss\n");
+        }
+    }
+    int align_kernel_size = align_ceil(kinfo->kernel_size, SZ_4K);
 
     // locate the kernel's own IKCONFIG gzip blob; runtime puff-inflates it
     size_t kcfg_start = 0, kcfg_bytes = 0;
@@ -773,20 +858,201 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
     setup->extra_size = extra_size;
 
     int map_start, map_max_size;
-    select_map_area(&kallsym, kallsym_kimg, pimg.ori_kimg_len, &map_start, &map_max_size, is_gki);
-    setup->map_offset = map_start;
-    setup->map_max_size = map_max_size;
-    tools_logi("map_start: 0x%x, max_size: 0x%x\n", map_start, map_max_size);
+    if (kinfo->is_arm32) {
+        /*
+         * AArch32: neither a kernel-text "map anchor hole" nor the BSS tail can
+         * host .setup.map.  Both conclusions are measured on the 5.15.167
+         * oracle, not assumed:
+         *
+         *  - select_map_area() picks a symbol and assumes the bytes after it are
+         *    disposable function-alignment NOP padding.  That is an arm64/GKI
+         *    property.  arm32 text has no such padding, so the picked region is
+         *    LIVE code: tcp_init_sock at 0xd8c0ec is a real `bl`, and the
+         *    0x890-byte .setup.map destroyed 14 live tcp functions down to
+         *    tcp_sendmsg_locked.
+         *
+         *  - the tail [_end, round_up(_end,1MB)) is NOT executable after the
+         *    real paging_init.  arch/arm/mm/mmu.c map_kernel(), called from
+         *    paging_init(), splits the kernel sections as
+         *        [kernel_sec_start,  round_up(__init_end,1MB)) MT_MEMORY_RWX
+         *        [round_up(__init_end,1MB), round_up(_end,1MB)) MT_MEMORY_RW
+         *    and on ARMv7 with XP build_mem_type_table() sets
+         *    `mem_types[MT_MEMORY_RW].prot_sect |= PMD_SECT_XN`.  Measured:
+         *    __init_end = 0xc1b00000, _end = 0xc1d8ac48, so all 0x753b8 bytes
+         *    of tail lie in the NX half -- _paging_init would prefetch-abort the
+         *    moment map_kernel() returned.
+         *
+         * The only region that is executable both before AND after
+         * map_kernel(), is never zeroed, never freed and holds no live kernel
+         * content is the SECTION_SIZE alignment padding the linker inserts
+         * immediately below __init_begin.  STRICT_KERNEL_RWX forces the .init
+         * section to be section-aligned (vmlinux.lds.S:
+         * `. = ALIGN(1<<SECTION_SHIFT)` before __init_begin), arm_memblock_init()
+         * already reserves the whole image via
+         * `memblock_reserve(__pa(KERNEL_START), KERNEL_END - KERNEL_START)`, and
+         * the padding is below __init_begin so free_initmem() does not touch it.
+         * Measured on the oracle: [__stop_unwind_tab 0xc18a36a4, __init_begin
+         * 0xc1900000) is 0x5c95c bytes of pure zeros containing no symbols, and
+         * it is inside the RWX half.
+         *
+         * Placement is __init_begin - MAP_MAX_SIZE, validated by self-checks
+         * that do not assume this kernel's layout (the real target is an
+         * unmeasured 4.9.193 device kernel): the region must be in the image,
+         * strictly below __init_begin, must contain no kallsyms symbol start,
+         * and must be all-zero in the input image.  Any failure is fatal --
+         * a wrong map_offset yields an unbootable image.
+         */
+        int32_t init_begin_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "__init_begin");
+        int32_t init_end_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "__init_end");
+        /* Test hook: force the search path on a kernel that DOES have __init_begin, so the
+         * search-based placement can be validated on the QEMU oracle as well. */
+        const char *force_search_str = getenv("KP_FORCE_MAP_SEARCH");
+        int32_t force_search = force_search_str && atoi(force_search_str) ? 1 : 0;
+        if (force_search && init_begin_off > 0) {
+            tools_logw("arm32: KP_FORCE_MAP_SEARCH=1 -> ignoring __init_begin 0x%x and searching\n", init_begin_off);
+            init_begin_off = 0;
+        }
+        int32_t last_content_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "__stop_unwind_tab");
+        if (!last_content_off) last_content_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "__end_rodata");
+        if (last_content_off <= 0) tools_loge_exit("arm32: cannot resolve __stop_unwind_tab/__end_rodata\n");
 
-    int sync_start = map_start;
-    int sync_size = map_max_size * 2;
-    if (sync_start + sync_size > ori_kimg_len) {
-        sync_size = ori_kimg_len - sync_start;
-    }
-    if (sync_size > 0) {
-        memcpy(out_kernel_file.kimg + sync_start, kallsym_kimg + sync_start, sync_size);
-        tools_logi("Synced NOP modifications from kallsym_kimg to output file (offset: 0x%x, size: 0x%x)\n",
-                   sync_start, sync_size);
+        map_max_size = MAP_MAX_SIZE;
+        int32_t map_ceiling_off;
+        if (init_begin_off > 0) {
+            map_ceiling_off = init_begin_off;
+            map_start = (int32_t)(init_begin_off - align_ceil(map_max_size, (int32_t)MAP_ALIGN));
+            if (map_start < last_content_off) {
+                tools_loge_exit("arm32: no linker padding below __init_begin (last content 0x%x, map_start 0x%x)\n",
+                                last_content_off, map_start);
+            }
+        } else {
+            /* Vendor kernels omit the linker-defined __init_begin/__init_end from
+             * kallsyms entirely.  Measured on the real XTC 4.9.193-perf image (read-only
+             * analysis, see port/XTC_DEVICE_KERNEL_READONLY_REPORT.md): neither symbol
+             * exists, _sinittext = 0x13f82e0 is not SECTION-aligned (so there is no
+             * STRICT_KERNEL_RWX alignment padding), and the 0x5a0 bytes immediately below
+             * _sinittext are NOT zero.  The fixed "below __init_begin" formula is therefore
+             * unusable there, so search instead.  The search only proposes a candidate:
+             * checks 1a-1d below still validate it (inside the image, below the first init
+             * symbol, no kallsyms symbol start inside, all-zero in the input image). */
+            int32_t sinit_off = get_symbol_offset_zero(&kallsym, kallsym_kimg, "_sinittext");
+            if (sinit_off <= 0)
+                tools_loge_exit("arm32: cannot resolve __init_begin or _sinittext to place .setup.map\n");
+            map_ceiling_off = sinit_off;
+            map_start = search_zero_map_region(&kallsym, kallsym_kimg, pimg.ori_kimg_len, sinit_off, map_max_size,
+                                               (int32_t)MAP_ALIGN);
+            if (map_start <= 0)
+                tools_loge_exit("arm32: no usable all-zero symbol-free region of 0x%x bytes below _sinittext 0x%x\n",
+                                map_max_size, sinit_off);
+            tools_logw("arm32: __init_begin absent; searched .setup.map region 0x%x..0x%x below _sinittext 0x%x\n",
+                       map_start, map_start + map_max_size, sinit_off);
+        }
+
+        int32_t map_end_off = map_start + map_max_size;
+
+        /*
+         * 1a. In range, inside the image, and strictly below __init_begin.
+         */
+        if (map_start < 0 || map_end_off > pimg.ori_kimg_len) {
+            tools_loge_exit("arm32: map region 0x%x..0x%x is outside the image (0x%x)\n", map_start, map_end_off,
+                            pimg.ori_kimg_len);
+        }
+        if (map_end_off > map_ceiling_off) {
+            tools_loge_exit("arm32: map region 0x%x..0x%x overlaps the init ceiling 0x%x\n", map_start, map_end_off,
+                            map_ceiling_off);
+        }
+
+        /*
+         * 1b. Executability, without any VA and without any alignment assumption.
+         *
+         * map_kernel() splits the kernel sections as
+         *   [kernel_sec_start, round_up(__pa(__init_end), 1M))  MT_MEMORY_RWX
+         *   [round_up(__pa(__init_end), 1M), kernel_sec_end)    MT_MEMORY_RW
+         * and on ARMv7 with XP the MT_MEMORY_RW section descriptor carries
+         * PMD_SECT_XN (build_mem_type_table()).  Since
+         *   __pa(map_end) <= __pa(__init_begin) < __pa(__init_end)
+         *                  <= round_up(__pa(__init_end), 1M)
+         * the region is ALWAYS in the RWX half -- for any kernel, at any
+         * alignment.  The earlier hard assertion that __init_end be
+         * SECTION-aligned was both unnecessary and wrong: it was evaluated in
+         * OFFSET space, where a 1 MB-aligned VA is not 1 MB-aligned (on this
+         * kernel __init_end VA 0xc1b00000 has offset 0x18f8000, because _text is
+         * 0xc0208000).  It would have rejected a perfectly good 4.9 kernel, so
+         * it is now informational.
+         */
+        if (init_end_off > 0 && (init_end_off & (int32_t)(SZ_1M - 1))) {
+            tools_logi("arm32: note: __init_end offset 0x%x is not SECTION-aligned. This is expected and NOT an "
+                       "error: the offset base (kernel VA) is not 1MB-aligned either, and a region below "
+                       "__init_begin lies in the RWX half regardless of alignment.\n",
+                       init_end_off);
+        }
+
+        /*
+         * 1c. No kallsyms symbol may start inside the region.  kptools has the
+         * full symbol table, so on the unmeasured 4.9 device kernel this is what
+         * replaces trusting that the bytes below __init_begin are padding.
+         */
+        struct arm32_map_overlap overlap = { 0 };
+        overlap.start = map_start;
+        overlap.end = map_end_off;
+        overlap.hit_index = -1;
+        on_each_symbol(&kallsym, kallsym_kimg, &overlap, arm32_map_overlap_cb);
+        if (overlap.hit_index >= 0) {
+            tools_loge_exit("arm32: refusing to place .setup.map at 0x%x..0x%x: kallsyms has '%s' (%c, index %d) "
+                            "at 0x%x\n",
+                            map_start, map_end_off, overlap.hit_symbol, overlap.hit_type, overlap.hit_index,
+                            overlap.hit_offset);
+        }
+
+        /*
+         * 1d. The target bytes must be zero in the INPUT image.  This is the
+         * check that matters most on the real device: if that padding carries
+         * data or a relocation there, overwriting it would brick boot, and a
+         * hard refusal is the correct outcome.
+         *
+         * kallsym_kimg is the pristine copy of the input image taken at the top
+         * of this function (the only code that ever modified it is the arm64
+         * NOP-sync, which arm32 skips), and disable_pi_map() edits a different
+         * buffer (kernel_file.kimg), so these are the bytes the kernel will
+         * actually load at kernel_va + map_offset.
+         */
+        for (int32_t i = map_start; i < map_end_off; i++) {
+            if (kallsym_kimg[i]) {
+                tools_loge_exit("arm32: refusing to place .setup.map at 0x%x: input image byte at 0x%x is 0x%02x, "
+                                "not padding\n",
+                                map_start, i, (unsigned char)kallsym_kimg[i]);
+            }
+        }
+
+        setup->map_offset = map_start;
+        setup->map_max_size = map_max_size;
+        tools_logi("arm32 map region: 0x%x..0x%x (size 0x%x); below __init_begin 0x%x, last symbol before it "
+                   "'__stop_unwind_tab'/_rodata 0x%x; region is symbol-free, zero-filled in the input image and "
+                   "in the RWX half of map_kernel()\n",
+                   map_start, map_end_off, map_max_size, init_begin_off, last_content_off);
+        // NOTE: no "Synced NOP modifications" pass for arm32.  That pass exists
+        // only to bake select_map_area()'s NOP-stomping of kernel text into the
+        // output image; arm32 no longer stomps anything.  Its disappearance from
+        // the arm32 log is the observable proof that the anchor path is dead;
+        // running it here would additionally copy `map_max_size * 2` bytes of
+        // the *unmodified* kallsym_kimg into the output image, undoing any
+        // earlier in-place edit to the image (e.g. disable_pi_map()).
+    } else {
+        select_map_area(&kallsym, kallsym_kimg, pimg.ori_kimg_len, &map_start, &map_max_size, is_gki);
+        setup->map_offset = map_start;
+        setup->map_max_size = map_max_size;
+        tools_logi("map_start: 0x%x, max_size: 0x%x\n", map_start, map_max_size);
+
+        int sync_start = map_start;
+        int sync_size = map_max_size * 2;
+        if (sync_start + sync_size > ori_kimg_len) {
+            sync_size = ori_kimg_len - sync_start;
+        }
+        if (sync_size > 0) {
+            memcpy(out_kernel_file.kimg + sync_start, kallsym_kimg + sync_start, sync_size);
+            tools_logi("Synced NOP modifications from kallsym_kimg to output file (offset: 0x%x, size: 0x%x)\n",
+                       sync_start, sync_size);
+        }
     }
 
     const char *symbol_lookup_anchor_name = 0;
@@ -857,7 +1123,14 @@ int patch_update_img_buf(const char *kimg, int kimg_len, const char *kpimg_path,
     int paging_init_offset = get_symbol_offset_exit(&kallsym, kallsym_kimg, "paging_init");
     setup->paging_init_offset = relo_branch_func(kallsym_kimg, paging_init_offset);
     int text_offset = align_kimg_len + SZ_4K;
-    b((uint32_t *)(out_kernel_file.kimg + kinfo->b_stext_insn_offset), kinfo->b_stext_insn_offset, text_offset);
+    if (kinfo->is_arm32) {
+        // ARM (A32) B from the kernel entry (offset 0) to setup_entry.
+        if (!b_arm((uint32_t *)(out_kernel_file.kimg + kinfo->b_stext_insn_offset), kinfo->b_stext_insn_offset,
+                   text_offset))
+            tools_loge_exit("arm32 entry branch out of range: 0x%x -> 0x%x\n", kinfo->b_stext_insn_offset, text_offset);
+    } else {
+        b((uint32_t *)(out_kernel_file.kimg + kinfo->b_stext_insn_offset), kinfo->b_stext_insn_offset, text_offset);
+    }
 
     // additional [len key=value] set
     char *addition_pos = setup->additional;
@@ -1082,7 +1355,10 @@ int dump_kallsym(const char *kimg_path)
     read_kernel_file(kimg_path, &kernel_file);
 
     kallsym_t kallsym;
-    if (analyze_kallsym_info(&kallsym, kernel_file.kimg, kernel_file.kimg_len, ARM64, 1)) {
+    // aarch32 port: a 32-bit ARM Image has no arm64 header; analyze it as ARM_LE.
+    int dump_is64 = !is_arm32_kernel_image(kernel_file.kimg, kernel_file.kimg_len);
+    enum arch_type dump_arch = dump_is64 ? ARM64 : ARM_LE;
+    if (analyze_kallsym_info(&kallsym, kernel_file.kimg, kernel_file.kimg_len, dump_arch, dump_is64)) {
         fprintf(stdout, "analyze_kallsym_info error\n");
         return -1;
     }

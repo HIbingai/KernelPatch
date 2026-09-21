@@ -11,15 +11,15 @@
 #include "hmem.h"
 
 // transit0
-typedef uint64_t (*transit0_func_t)();
+typedef kp_transit_ret_t (*transit0_func_t)();
 
 #define current_fp_hook_chain() ({ \
-    uint64_t chain_va; \
-    asm volatile("mov %0, x16" : "=r"(chain_va)); \
+    uintptr_t chain_va; \
+    asm volatile("mov %0, " KP_CHAIN_REG : "=r"(chain_va)); \
     (fp_hook_chain_t *)chain_va; \
 })
 
-uint64_t __attribute__((section(".fp.transit0.text"))) __attribute__((__noinline__)) _fp_transit0()
+kp_transit_ret_t __attribute__((section(".fp.transit0.text"))) __attribute__((__noinline__)) _fp_transit0()
 {
     fp_hook_chain_t *hook_chain = current_fp_hook_chain();
     if (!hook_chain) return 0;
@@ -40,15 +40,15 @@ uint64_t __attribute__((section(".fp.transit0.text"))) __attribute__((__noinline
         hook_chain0_callback func = hook_chain->afters[i];
         if (func) func(&fargs, hook_chain->udata[i]);
     }
-    return fargs.ret;
+    return (kp_transit_ret_t)fargs.ret;
 }
 extern void _fp_transit0_end();
 
 // transit4
-typedef uint64_t (*transit4_func_t)(uint64_t, uint64_t, uint64_t, uint64_t);
+typedef kp_transit_ret_t (*transit4_func_t)(kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t);
 
-uint64_t __attribute__((section(".fp.transit4.text"))) __attribute__((__noinline__))
-_fp_transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+kp_transit_ret_t __attribute__((section(".fp.transit4.text"))) __attribute__((__noinline__))
+_fp_transit4(kp_transit_arg_t arg0, kp_transit_arg_t arg1, kp_transit_arg_t arg2, kp_transit_arg_t arg3)
 {
     fp_hook_chain_t *hook_chain = current_fp_hook_chain();
     if (!hook_chain) return 0;
@@ -73,17 +73,17 @@ _fp_transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
         hook_chain4_callback func = hook_chain->afters[i];
         if (func) func(&fargs, hook_chain->udata[i]);
     }
-    return fargs.ret;
+    return (kp_transit_ret_t)fargs.ret;
 }
 
 extern void _fp_transit4_end();
 
 // transit8:
-typedef uint64_t (*transit8_func_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+typedef kp_transit_ret_t (*transit8_func_t)(kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t);
 
-uint64_t __attribute__((section(".fp.transit8.text"))) __attribute__((__noinline__))
-_fp_transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
-             uint64_t arg7)
+kp_transit_ret_t __attribute__((section(".fp.transit8.text"))) __attribute__((__noinline__))
+_fp_transit8(kp_transit_arg_t arg0, kp_transit_arg_t arg1, kp_transit_arg_t arg2, kp_transit_arg_t arg3, kp_transit_arg_t arg4, kp_transit_arg_t arg5, kp_transit_arg_t arg6,
+             kp_transit_arg_t arg7)
 {
     fp_hook_chain_t *hook_chain = current_fp_hook_chain();
     if (!hook_chain) return 0;
@@ -113,18 +113,18 @@ _fp_transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_
         hook_chain8_callback func = hook_chain->afters[i];
         if (func) func(&fargs, hook_chain->udata[i]);
     }
-    return fargs.ret;
+    return (kp_transit_ret_t)fargs.ret;
 }
 
 extern void _fp_transit8_end();
 
 // transit12:
-typedef uint64_t (*transit12_func_t)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
-                                     uint64_t, uint64_t, uint64_t, uint64_t);
+typedef kp_transit_ret_t (*transit12_func_t)(kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t,
+                                     kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t, kp_transit_arg_t);
 
-uint64_t __attribute__((section(".fp.transit12.text"))) __attribute__((__noinline__))
-_fp_transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
-              uint64_t arg7, uint64_t arg8, uint64_t arg9, uint64_t arg10, uint64_t arg11)
+kp_transit_ret_t __attribute__((section(".fp.transit12.text"))) __attribute__((__noinline__))
+_fp_transit12(kp_transit_arg_t arg0, kp_transit_arg_t arg1, kp_transit_arg_t arg2, kp_transit_arg_t arg3, kp_transit_arg_t arg4, kp_transit_arg_t arg5, kp_transit_arg_t arg6,
+              kp_transit_arg_t arg7, kp_transit_arg_t arg8, kp_transit_arg_t arg9, kp_transit_arg_t arg10, kp_transit_arg_t arg11)
 {
     fp_hook_chain_t *hook_chain = current_fp_hook_chain();
     if (!hook_chain) return 0;
@@ -158,7 +158,7 @@ _fp_transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
         hook_chain12_callback func = hook_chain->afters[i];
         if (func) func(&fargs, hook_chain->udata[i]);
     }
-    return fargs.ret;
+    return (kp_transit_ret_t)fargs.ret;
 }
 
 extern void _fp_transit12_end();
@@ -196,13 +196,8 @@ static hook_err_t hook_chain_prepare(uint32_t *transit, int32_t argno)
     // todo: assert
     if (transit_num + 6 > TRANSIT_INST_NUM) return -HOOK_TRANSIT_NO_MEM;
 
-    transit[0] = ARM64_BTI_JC;
-    transit[1] = 0x58000070; // LDR X16, #12
-    transit[2] = 0x14000004; // B #16
-    transit[3] = ARM64_NOP;
     fp_hook_chain_t *chain = local_container_of(transit, fp_hook_chain_t, transit);
-    transit[4] = ((uint64_t)chain) & 0xFFFFFFFF;
-    transit[5] = ((uint64_t)chain) >> 32u;
+    kp_chain_transit_header(transit, chain);
     for (int i = 0; i < transit_num; i++) {
         transit[i + 6] = ((uint32_t *)transit_start)[i];
     }
@@ -215,7 +210,14 @@ void fp_hook(uintptr_t fp_addr, void *replace, void **backup)
     uintptr_t addrs[2];
     addrs[0] = fp_addr;
     addrs[1] = fp_addr + 4;
+#if defined(CONFIG_ARM)
+    /* ILP32: a function pointer is a single 32-bit word.  Patching fp_addr+4
+     * as well (the arm64 8-byte slot) would write the high half of the pointer
+     * -- 0 -- into the *following* table entry, e.g. sys_call_table[nr+1]. */
+    hotpatch((void **)addrs, (uint32_t *)&replace, 1);
+#else
     hotpatch((void **)addrs, (uint32_t *)&replace, 2);
+#endif
 }
 KP_EXPORT_SYMBOL(fp_hook);
 
@@ -224,7 +226,14 @@ void fp_unhook(uintptr_t fp_addr, void *backup)
     uintptr_t addrs[2];
     addrs[0] = fp_addr;
     addrs[1] = fp_addr + 4;
+#if defined(CONFIG_ARM)
+    /* ILP32: a function pointer is a single 32-bit word.  Patching fp_addr+4
+     * as well (the arm64 8-byte slot) would write the high half of the pointer
+     * -- 0 -- into the *following* table entry, e.g. sys_call_table[nr+1]. */
+    hotpatch((void **)addrs, (uint32_t *)&backup, 1);
+#else
     hotpatch((void **)addrs, (uint32_t *)&backup, 2);
+#endif
 }
 KP_EXPORT_SYMBOL(fp_unhook);
 

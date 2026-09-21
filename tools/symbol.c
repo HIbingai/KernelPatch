@@ -32,6 +32,29 @@ int32_t find_suffixed_symbol(kallsym_t *kallsym, char *img_buf, const char *symb
     return udata.addr;
 }
 
+struct bss_extent_struct
+{
+    int32_t max;
+};
+
+static int32_t bss_extent_callbackup(int32_t index, char type, const char *symbol, int32_t offset, void *userdata)
+{
+    struct bss_extent_struct *data = (struct bss_extent_struct *)userdata;
+    /* kallsyms type letters: 'b' local bss, 'B' global bss */
+    if ((type == 'b' || type == 'B') && offset > data->max) {
+        data->max = offset;
+    }
+    return 0; /* keep walking */
+}
+
+int32_t get_bss_extent_symbol_offset(kallsym_t *kallsym, char *img_buf)
+{
+    struct bss_extent_struct data = { 0 };
+    on_each_symbol(kallsym, img_buf, &data, bss_extent_callbackup);
+    if (data.max) tools_logi("arm32 bss extent: highest bss symbol offset 0x%08x\n", data.max);
+    return data.max;
+}
+
 int32_t get_symbol_offset_zero(kallsym_t *info, char *img, char *symbol)
 {
     int32_t offset = get_symbol_offset(info, img, symbol);
@@ -340,6 +363,71 @@ int fillin_patch_config(kallsym_t *kallsym, char *img_buf, int imglen, patch_con
         for (int64_t *pos = (int64_t *)symbol; pos <= (int64_t *)symbol; pos++) {
             *pos = i64swp(*pos);
         }
+    }
+    return 0;
+}
+
+
+struct map_search_syms
+{
+    int32_t run_start;
+    int32_t run_end;
+    int32_t first; /* lowest symbol offset inside the run  (-1 = none) */
+    int32_t last;  /* highest symbol offset inside the run (-1 = none) */
+};
+
+static int32_t map_search_syms_cb(int32_t index, char type, const char *symbol, int32_t offset, void *userdata)
+{
+    struct map_search_syms *d = (struct map_search_syms *)userdata;
+    if (offset >= d->run_start && offset < d->run_end) {
+        if (d->first < 0 || offset < d->first) d->first = offset;
+        if (offset > d->last) d->last = offset;
+    }
+    return 0;
+}
+
+/* Highest aligned window of map_size bytes inside [a, b), or 0 if it does not fit. */
+static int32_t best_window_in(int32_t a, int32_t b, int32_t map_size, int32_t map_align)
+{
+    int32_t s = (int32_t)align_floor((uint64_t)(b - map_size), (uint64_t)map_align);
+    if (s < a) s = (int32_t)align_ceil((uint64_t)a, (uint64_t)map_align);
+    if (s < a || s + map_size > b) return 0;
+    return s;
+}
+
+int32_t search_zero_map_region(kallsym_t *kallsym, char *img_buf, int32_t img_len, int32_t ceiling_off,
+                               int32_t map_size, int32_t map_align)
+{
+    int32_t i = ceiling_off - 1;
+    if (i > img_len - 1) i = img_len - 1;
+    while (i >= 0) {
+        if (img_buf[i]) {
+            i--;
+            continue;
+        }
+        int32_t run_end = i + 1;
+        while (i >= 0 && !img_buf[i]) i--;
+        int32_t run_start = i + 1;
+        if (run_end - run_start < map_size) continue;
+
+        struct map_search_syms d = { run_start, run_end, -1, -1 };
+        on_each_symbol(kallsym, img_buf, &d, map_search_syms_cb);
+
+        int32_t s = 0;
+        if (d.first < 0) {
+            s = best_window_in(run_start, run_end, map_size, map_align);
+        } else {
+            /* prefer a window above the highest symbol inside the run ... */
+            s = best_window_in(d.last + 1, run_end, map_size, map_align);
+            /* ... otherwise a window below the lowest one */
+            if (!s) s = best_window_in(run_start, d.first, map_size, map_align);
+        }
+        if (s) {
+            tools_logi("arm32 map search: zero run 0x%x..0x%x, symbol(s) inside: %s, chosen 0x%x\n", run_start,
+                       run_end, d.first < 0 ? "none" : "yes", s);
+            return s;
+        }
+        tools_logi("arm32 map search: zero run 0x%x..0x%x not usable (symbols inside)\n", run_start, run_end);
     }
     return 0;
 }

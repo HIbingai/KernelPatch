@@ -39,6 +39,7 @@ extern bool log_enable;
     } while (0)
 
 #define SZ_4K 0x1000
+#define SZ_1M 0x100000
 
 #define align_floor(x, align) ((uint64_t)(x) & ~((uint64_t)(align)-1))
 #define align_ceil(x, align) (((uint64_t)(x) + (uint64_t)(align)-1) & ~((uint64_t)(align)-1))
@@ -57,6 +58,7 @@ static inline void set_log_enable(bool enable)
 
 int can_b_imm(uint64_t from, uint64_t to);
 int b(uint32_t *buf, uint64_t from, uint64_t to);
+int b_arm(uint32_t *buf, uint64_t from, uint64_t to);
 int32_t relo_branch_func(const char *img, int32_t func_offset);
 
 void write_file(const char *path, const char *con, int len, bool append);
