@@ -454,8 +454,9 @@ uint64_t pgtable_phys(uint64_t pgd, uint64_t va)
 #endif /* CONFIG_ARM */
 KP_EXPORT_SYMBOL(pgtable_phys);
 
-static void prot_myself()
+static void prot_myself(uint64_t boot_stage)
 {
+    (void)boot_stage;
     kp_pte_t *kpte = pgtable_entry_kernel(kernel_stext_va);
     log_boot("Kernel stext prot: %llx\n", (uint64_t)*kpte);
 
@@ -561,6 +562,29 @@ static void prot_myself()
     flush_tlb_kernel_range(_kp_rox_start, _kp_rox_end);
 
     // add to vmalloc area
+#if defined(CONFIG_ARM)
+    /*
+     * AArch32: SKIP ENTIRELY.  This call is what hung the first on-device boot,
+     * and it is meaningless on this target anyway: AArch32 has ONE flat linear
+     * map (see include/pgtable.h), so has_vmalloc_area() is false and the KP
+     * region does not live in a vmalloc window at all.
+     *
+     * Two independent reasons it cannot work at this point on 4.9 ARM32:
+     *  1. prot_myself() runs INSIDE paging_init(), but the vmalloc layer that
+     *     vm_area_add_early() manipulates is brought up by vmalloc_init(),
+     *     which mm_init() calls only AFTER setup_arch()/paging_init() return.
+     *     The 4.9 body allocates from vmap_area_cachep, still NULL here, and
+     *     vmap_area_root is empty -> BUG_ON / garbage dereference, with no
+     *     console and no watchdog yet -> silent permanent hang (measured:
+     *     stage 11 = pass, stage 12 = hang).
+     *  2. struct vm_struct is a 32-bit layout on this target (4-byte pointers)
+     *     while kp_vm is the 64-bit arm64 layout, so even a live vmap layer
+     *     would read addr/size/flags/flags from wrong offsets.
+     * The 5.15.167 QEMU oracle never caught this: it is arm64, where both the
+     * lifecycle prerequisite and the struct layout are different.
+     */
+    if (boot_stage == 14) return;
+#else
     void (*vm_area_add_early)(struct vm_struct *vm) =
         (typeof(vm_area_add_early))kallsyms_lookup_name("vm_area_add_early");
 
@@ -573,6 +597,7 @@ static void prot_myself()
         vm_area_add_early(&kp_vm);
         log_boot("add vmalloc area: %llx, %llx\n", (unsigned long long)kp_vm.addr, (unsigned long long)kp_vm.size);
     }
+#endif
 }
 
 // Restore the map anchor area (a sacrificed kernel function) to its
@@ -735,14 +760,26 @@ static int start_init(uint64_t kimage_voff, uint64_t linear_voff)
         kallsyms_resolver = "backward_symbol_scan";
     }
 #endif
+    /*
+     * PRESET FIRST.  kptools derived kallsyms_lookup_name_offset for exactly
+     * this kernel and it is verified against this image: 0x1dcd98 ->
+     * 0xc01e4d98, which is the kernel's own kallsyms_lookup_name (the same
+     * value is also carried in patch_config[0]).
+     *
+     * Only fall back to the symbol scan when the preset has no value.  The
+     * scan calls KERNEL CODE through a second preset-derived pointer
+     * (start_preset.sprintf_offset), and on this target that field is off by
+     * TEXT_OFFSET (0x8000): 0x4bf0a8 -> 0xc04bf0a8, which is NOT sprintf
+     * (0xc04c70a8).  Measured: the scan does not crash (stage 11 passes) -- it
+     * parses garbage, returns 0 and the preset value is used anyway -- so this
+     * reorder only removes up to 4096 bogus kernel calls and boot-time risk.
+     */
+    kallsym_offset = start_preset.kallsyms_lookup_name_offset;
     if (!kallsym_offset) {
         kallsym_offset = resolve_kallsyms_lookup_name_by_symbol_lookup_anchor();
         if (kallsym_offset) {
             kallsyms_resolver = "symbol_lookup_anchor";
         }
-    }
-    if (!kallsym_offset) {
-        kallsym_offset = start_preset.kallsyms_lookup_name_offset;
     }
     if (!kallsym_offset) {
         log_kallsyms_lookup_name_unresolved();
@@ -836,16 +873,38 @@ static int start_init(uint64_t kimage_voff, uint64_t linear_voff)
 void symbol_init();
 int patch();
 
-int __attribute__((section(".start.text"))) __noinline start(uint64_t kimage_voff, uint64_t linear_voff)
+int __attribute__((section(".start.text"))) __noinline start(uint64_t kimage_voff, uint64_t linear_voff,
+                                                             uint64_t boot_stage)
 {
     int rc = 0;
+    (void)boot_stage;
     // raw stash for post-mortem debugging: no vsnprintf available yet here
     ((uint64_t *)boot_log)[0] = 0x4b50565354415254ull; // "KPVSTART" marker
     ((uint64_t *)boot_log)[1] = kimage_voff;
     ((uint64_t *)boot_log)[2] = linear_voff;
+#if defined(CONFIG_ARM)
+    /*
+     * --- KP_MAP_STAGE ladder, part 2: inside start() ---------------------
+     * The _paging_init ladder proved the whole relocation is clean on this
+     * target (stages 3/4/5 all boot), so the remaining fault is in KP's own
+     * init here.  These checkpoints split that init into ordered steps:
+     *   10 = return before any KP init at all (tests the jump into the
+     *        relocated region and the return through _paging_init's tail)
+     *   11 = return after start_init() (kallsyms + printk + vmalloc area)
+     *   12 = return after prot_myself() (page-table self-protection)
+     *   13 = return after symbol_init(), before patch()
+     */
+    if (boot_stage == 10) return 0;
+#endif
     rc = start_init(kimage_voff, linear_voff);
     if (rc) return rc;
-    prot_myself();
+#if defined(CONFIG_ARM)
+    if (boot_stage == 11) return 0;
+#endif
+    prot_myself(boot_stage);
+#if defined(CONFIG_ARM)
+    if (boot_stage == 12) return 0;
+#endif
     // Restore the map anchor.
     //
     // ARM64: select_map_area() NOPs a code hole in live kernel text and the
@@ -865,6 +924,9 @@ int __attribute__((section(".start.text"))) __noinline start(uint64_t kimage_vof
     log_regs();
     predata_init();
     symbol_init();
+#if defined(CONFIG_ARM)
+    if (boot_stage == 13) return 0;
+#endif
     rc = patch();
 #if defined(CONFIG_ARM)
     // AArch32: return normally.

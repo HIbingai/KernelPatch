@@ -29,6 +29,8 @@ typedef uint64_t phys_addr_t;
 #endif
 typedef int (*memblock_reserve_f)(phys_addr_t base, phys_addr_t size);
 typedef phys_addr_t (*memblock_phys_alloc_try_nid_f)(phys_addr_t size, phys_addr_t align, int nid);
+typedef phys_addr_t (*memblock_alloc_try_nid_f)(phys_addr_t size, phys_addr_t align, phys_addr_t min_addr,
+                                                phys_addr_t max_addr, int nid);
 typedef void *(*memblock_virt_alloc_try_nid_f)(phys_addr_t size, phys_addr_t align, phys_addr_t min_addr,
                                                phys_addr_t max_addr, int nid);
 typedef int (*memblock_free_f)(phys_addr_t base, phys_addr_t size);
@@ -99,20 +101,36 @@ static inline uint64_t phys_to_lm(map_data_t *data, uint64_t phys)
 
 static uint64_t map_phys_alloc(map_data_t *data, uint64_t size, uint64_t align)
 {
-    if (data->map_symbol.memblock_phys_alloc_type == MAP_SYM_MEMBLOCK_PHYS_ALLOC_TRY_NID ||
-        data->map_symbol.memblock_phys_alloc_type == MAP_SYM_MEMBLOCK_ALLOC_TRY_NID) {
-        /*
-         * memblock_phys_alloc_try_nid(size, align, nid): 3rd arg is the NUMA node.
-         * memblock_alloc_try_nid(size, align, min_addr, max_addr, nid): 3rd arg is min_addr.
-         * On old kernels (4.x) that lack memblock_phys_alloc_try_nid, the patcher falls back
-         * to the 5-arg memblock_alloc_try_nid. Passing NUMA_NO_NODE(-1) there makes min_addr
-         * 0xffffffffffffffff so the allocation always fails (start > end) and start_pa = 0,
-         * which corrupts memory at PA 0 and prevents boot. Use 0 (= nid 0 / min_addr 0).
-         */
-        int third_arg = (data->map_symbol.memblock_phys_alloc_type == MAP_SYM_MEMBLOCK_PHYS_ALLOC_TRY_NID)
-                            ? NUMA_NO_NODE
-                            : 0;
-        return ((memblock_phys_alloc_try_nid_f)data->map_symbol.memblock_phys_alloc_relo)(size, align, third_arg);
+    /*
+     * Dispatch on the ARGUMENT COUNT the resolved symbol really has:
+     *
+     *   MAP_SYM_MEMBLOCK_PHYS_ALLOC_TRY_NID (1)
+     *       memblock_phys_alloc_try_nid(size, align, nid)              -- 3 args
+     *   MAP_SYM_MEMBLOCK_ALLOC_TRY_NID (2)
+     *       memblock_alloc_try_nid(size, align, min_addr, max_addr, nid)
+     *                                                                  -- 5 args
+     *
+     * (2) is the 4.x fallback, and it is what the on-device patcher picked for
+     * this target: 4.9.193 has no memblock_phys_alloc_try_nid, so kptools
+     * resolved memblock_alloc_try_nid instead.  It MUST be called through a
+     * five-argument prototype.  Calling it through the three-argument one left
+     * max_addr (r3) and nid (the stacked fifth argument) undefined, so
+     * memblock_find_in_range_node() either clamped the search window to nothing
+     * or missed every region because of a bogus node id; the allocation then
+     * returned 0 and _paging_init went on to map and zero VA
+     * (0 + kimage_voffset) instead of a fresh KP region -- overwriting live
+     * kernel memory and hanging the device with no console output.
+     *
+     * The values passed for (2) are exactly the kernel's own memblock_alloc():
+     * min_addr = MEMBLOCK_ALLOC_ACCESSIBLE (0), max_addr = MEMBLOCK_ALLOC_ANYWHERE
+     * (~0) and nid = NUMA_NO_NODE.
+     */
+    if (data->map_symbol.memblock_phys_alloc_type == MAP_SYM_MEMBLOCK_PHYS_ALLOC_TRY_NID) {
+        return ((memblock_phys_alloc_try_nid_f)data->map_symbol.memblock_phys_alloc_relo)(size, align, NUMA_NO_NODE);
+    }
+    if (data->map_symbol.memblock_phys_alloc_type == MAP_SYM_MEMBLOCK_ALLOC_TRY_NID) {
+        return ((memblock_alloc_try_nid_f)data->map_symbol.memblock_phys_alloc_relo)(
+            size, align, (phys_addr_t)0, (phys_addr_t)~(phys_addr_t)0, NUMA_NO_NODE);
     }
 
     return 0;
@@ -250,8 +268,9 @@ static __noinline void mem_proc(map_data_t *data)
     data->linear_voffset = data->kimage_voffset;
 #else
     if (data->map_symbol.memblock_virt_alloc_relo) {
-        uint64_t detect_phys =
-            ((memblock_phys_alloc_try_nid_f)data->map_symbol.memblock_phys_alloc_relo)(0, 0x10, NUMA_NO_NODE);
+        /* route through the same dispatcher so the 5-arg 4.x fallback gets all
+         * five arguments here too */
+        uint64_t detect_phys = map_phys_alloc(data, 0, 0x10);
         uint64_t detect_virt = (uint64_t)((memblock_virt_alloc_try_nid_f)data->map_symbol.memblock_virt_alloc_relo)(
             0, 0x10, detect_phys, detect_phys, NUMA_NO_NODE);
         data->linear_voffset = detect_virt - detect_phys;
@@ -733,6 +752,33 @@ void __noinline _paging_init(void)
 #endif
     // alloc
     uint64_t start_pa = map_phys_alloc(data, all_size, map_align);
+
+#if defined(CONFIG_ARM)
+    /*
+     * --- KP_MAP_STAGE: AArch32 boot bisect knob -------------------------
+     * memblock_virt_alloc_type is never read on AArch32 (linear_voffset is the
+     * image offset by construction, see the AArch32 branch below), so it is
+     * free to carry a stage selector that map_prepare() copies into map_data.
+     * The setup preset ships 1, which means "run everything".  A test image can
+     * patch preset+0x98 (= setup_map_symbol_offset + 0x30) to 3/4/5/6 and stop
+     * _paging_init() at successive points, so one blob bisects the boot across
+     * a few images instead of requiring a rebuild per step:
+     *
+     *   6 = DETECTOR: bail out only if the memblock allocation returned 0, so a
+     *       clean boot proves start_pa == 0 was the fault (a successful
+     *       allocation keeps going into exactly the code that hangs)
+     *   3 = stop after the real paging_init() has run
+     *   4 = stop after the new region's page tables are built
+     *   5 = stop after the kpimg has been copied into the new region
+     *   1 (or anything else) = production: continue into start()
+     */
+    const uint32_t kp_stage = (uint32_t)data->map_symbol.memblock_virt_alloc_type;
+    if (kp_stage == 6 && start_pa == 0) return;
+#else
+    /* Non-AArch32 builds keep the arm64 path behaviour: stage 1 only. */
+    const uint32_t kp_stage = 1;
+#endif
+
     // mark all size nomap
     if (data->map_symbol.memblock_mark_nomap_relo)
         ((memblock_mark_nomap_f)(data->map_symbol.memblock_mark_nomap_relo))(start_pa, all_size);
@@ -776,6 +822,7 @@ void __noinline _paging_init(void)
 #endif
 #if defined(CONFIG_ARM)
     ((paging_init_f)(paging_init_va))(mdesc);
+    if (kp_stage == 3) return;
 #else
     ((paging_init_f)(paging_init_va))();
 #endif
@@ -866,6 +913,9 @@ void __noinline _paging_init(void)
 #endif
     }
     flush_tlb_all();
+#if defined(CONFIG_ARM)
+    if (kp_stage == 4) return;
+#endif
 
 #if defined(CONFIG_ARM)
     /*
@@ -902,6 +952,10 @@ void __noinline _paging_init(void)
     // free old start
     ((memblock_free_f)data->map_symbol.memblock_free_relo)(old_start_pa, reserve_size);
 
+#if defined(CONFIG_ARM)
+    if (kp_stage == 5) return;
+#endif
+
     // start
-    ((start_f)start_va)(data->kimage_voffset, data->linear_voffset);
+    ((start_f)start_va)(data->kimage_voffset, data->linear_voffset, (uint64_t)kp_stage);
 }
